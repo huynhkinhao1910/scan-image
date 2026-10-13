@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type fakeS3 struct {
@@ -25,6 +26,15 @@ type fakeS3 struct {
 	parts   map[string]map[int][]byte
 	failPut int
 	types   map[string]string
+	// headSize, when set, makes HEAD report this size; headMissing makes it 404.
+	headSize    int
+	headMissing bool
+	// list* drive the ListObjectsV2 handler: raw queries received, a cap on
+	// keys per page, prefixes that answer 403, and a per-request delay.
+	listQueries []string
+	listPageMax int
+	listFail    map[string]bool
+	listDelay   time.Duration
 }
 
 func newFake() *fakeS3 {
@@ -43,9 +53,15 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	switch {
 	case r.Method == "GET" && q.Get("list-type") == "2":
-		fmt.Fprint(w, "<ListBucketResult></ListBucketResult>")
+		f.list(w, r, q)
 	case r.Method == "HEAD":
 		b, ok := f.objects[key]
+		if f.headMissing {
+			ok = false
+		}
+		if ok && f.headSize > 0 {
+			b = make([]byte, f.headSize)
+		}
 		if !ok {
 			w.WriteHeader(404)
 			return
@@ -182,7 +198,7 @@ func (m memSecrets) Set(a, s string) error        { m[a] = s; return nil }
 func TestConfigRoundTripKeepsSecretOutOfFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "x", "s3.json")
 	sec := memSecrets{}
-	in := Config{Bucket: "b", Region: "r", AccessKey: "AK", SecretKey: "topsecret"}
+	in := Config{Bucket: "b", Region: "r", AccessKey: "AK", SecretKey: "topsecret", ListURL: "https://example.com/list.txt"}
 	if err := SaveConfig(p, in, sec); err != nil {
 		t.Fatal(err)
 	}
@@ -193,5 +209,122 @@ func TestConfigRoundTripKeepsSecretOutOfFile(t *testing.T) {
 	out, err := LoadConfig(p, sec)
 	if err != nil || out != in {
 		t.Errorf("loaded %+v, %v", out, err)
+	}
+}
+
+func TestUploadWithOverwriteReplacesExisting(t *testing.T) {
+	f, c, local, data := setup(t, 1000)
+	f.objects["k.jpg"] = make([]byte, len(data))
+	res, err := c.UploadWith(context.Background(), local, "k.jpg", UploadOptions{}, nil)
+	if err != nil || !res.Skipped {
+		t.Fatalf("without overwrite: %+v %v, want skipped", res, err)
+	}
+	res, err = c.UploadWith(context.Background(), local, "k.jpg", UploadOptions{Overwrite: true}, nil)
+	if err != nil || res.Skipped || !bytes.Equal(f.objects["k.jpg"], data) {
+		t.Fatalf("overwrite: %+v %v, stored equal=%v", res, err, bytes.Equal(f.objects["k.jpg"], data))
+	}
+}
+
+func TestUploadWithVerify(t *testing.T) {
+	opt := UploadOptions{Verify: true}
+	t.Run("passes", func(t *testing.T) {
+		_, c, local, _ := setup(t, 1000)
+		if _, err := c.UploadWith(context.Background(), local, "k.jpg", opt, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("size mismatch", func(t *testing.T) {
+		f, c, local, _ := setup(t, 1000)
+		f.headSize = 7
+		_, err := c.UploadWith(context.Background(), local, "k.jpg", opt, nil)
+		if err == nil || !strings.Contains(err.Error(), "k.jpg") || !strings.Contains(err.Error(), "1000") || !strings.Contains(err.Error(), "7") {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("missing", func(t *testing.T) {
+		f, c, local, _ := setup(t, 1000)
+		f.headMissing = true
+		_, err := c.UploadWith(context.Background(), local, "k.jpg", opt, nil)
+		if err == nil || !strings.Contains(err.Error(), "k.jpg") {
+			t.Fatalf("err %v", err)
+		}
+	})
+}
+
+func TestUploadRefusesSymlinkAndNonRegularSource(t *testing.T) {
+	f, c, local, _ := setup(t, 1000)
+	link := filepath.Join(t.TempDir(), "link.jpg")
+	if err := os.Symlink(local, link); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := c.UploadWith(context.Background(), link, "k.jpg", UploadOptions{Overwrite: true}, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "link.jpg") {
+		t.Fatalf("symlink: err %v, want a refusal naming the file", err)
+	}
+	if _, err := c.UploadWith(context.Background(), t.TempDir(), "k.jpg", UploadOptions{Overwrite: true}, nil); err == nil {
+		t.Fatal("directory: want a refusal")
+	}
+	if len(f.objects) != 0 {
+		t.Fatalf("stored %d objects, want none", len(f.objects))
+	}
+}
+
+func TestStalledServerFailsInsteadOfPinningAWorker(t *testing.T) {
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-stop:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(stop) })
+	c := New(Config{Endpoint: srv.URL, Bucket: "bucket", AccessKey: "AK", SecretKey: "SK", PathStyle: true})
+	if tr, ok := c.http.Transport.(*http.Transport); !ok || tr.ResponseHeaderTimeout != responseHeaderTimeout {
+		t.Fatalf("New: transport %T does not carry the response header timeout", c.http.Transport)
+	}
+	c.http = &http.Client{Transport: transportWith(50 * time.Millisecond)}
+	c.Retries = 0
+
+	start := time.Now()
+	_, _, err := c.Head(context.Background(), "k.jpg")
+
+	if err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("err %v after %v, want a timeout error", err, time.Since(start))
+	}
+}
+
+func TestObjectURLIsTheAddressABrowserOpens(t *testing.T) {
+	cfg := Config{Bucket: "thanhcong", Region: "us-east-1"}
+	got, err := New(cfg).ObjectURL("Etsy/Etsy-Chau/A 09.png")
+	if want := "https://thanhcong.s3.us-east-1.amazonaws.com/Etsy/Etsy-Chau/A%2009.png"; err != nil || got != want {
+		t.Fatalf("got %q, %v; want %q", got, err, want)
+	}
+	cfg.Endpoint, cfg.PathStyle = "https://minio.local:9000", true
+	got, err = New(cfg).ObjectURL("a.png")
+	if want := "https://minio.local:9000/thanhcong/a.png"; err != nil || got != want {
+		t.Fatalf("path style: got %q, %v; want %q", got, err, want)
+	}
+}
+
+func TestUploadRefusesEmptyFile(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	defer srv.Close()
+	c := New(Config{Endpoint: srv.URL, Bucket: "bucket", AccessKey: "AK", SecretKey: "SK", PathStyle: true})
+	empty := filepath.Join(t.TempDir(), "blank.png")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := c.UploadWith(context.Background(), empty, "Etsy/A/blank.png", UploadOptions{Overwrite: true, Verify: true}, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "0 byte") {
+		t.Fatalf("err = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("an empty file reached the bucket: %d requests", calls)
 	}
 }

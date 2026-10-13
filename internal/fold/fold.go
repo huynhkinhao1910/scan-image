@@ -64,3 +64,37 @@ func String(s string) string {
 func Bytes(dst []byte, s string) []byte {
 	return append(dst, String(s)...)
 }
+
+// Append appends the folded form of name to dst and returns the extended
+// slice. The result equals String(string(name)). It does not allocate when
+// dst has capacity and name is ASCII.
+func Append(dst, name []byte) []byte {
+	i := 0
+	for i < len(name) && name[i] < utf8.RuneSelf && (name[i] < 'A' || name[i] > 'Z') {
+		i++
+	}
+	dst = append(dst, name[:i]...)
+	for i < len(name) {
+		c := name[i]
+		switch {
+		case c < utf8.RuneSelf:
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			dst = append(dst, c)
+			i++
+		default:
+			r, w := utf8.DecodeRune(name[i:])
+			i += w
+			if isCombining(r) {
+				continue
+			}
+			r = unicode.ToLower(r)
+			if m, ok := table[r]; ok {
+				r = m
+			}
+			dst = utf8.AppendRune(dst, r)
+		}
+	}
+	return dst
+}
