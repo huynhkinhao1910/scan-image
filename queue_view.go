@@ -91,6 +91,7 @@ func (a *app) queueToolbar(c *ui.Context) {
 
 func (a *app) queueTable(c *ui.Context) {
 	cols := []ui.TableColumn{
+		numberColumn,
 		{Title: "File", MinWidth: 180},
 		{Title: "Path trên S3", MinWidth: 220},
 		{Title: "Nguồn trên ổ mạng", MinWidth: 240},
@@ -104,14 +105,16 @@ func (a *app) queueTable(c *ui.Context) {
 		j := newest(row)
 		switch col {
 		case 0:
-			nameCell(c, path.Base(j.Key))
+			rowNumber(c, row, false)
 		case 1:
-			ui.Text(c, j.Key).SingleLine().TextColor(colMuted)
+			nameCell(c, path.Base(j.Key))
 		case 2:
-			ui.Text(c, j.Path).SingleLine().TextColor(colMuted)
+			ui.Text(c, j.Key).SingleLine().TextColor(colMuted)
 		case 3:
-			a.jobStatusCell(c, j)
+			ui.Text(c, j.Path).SingleLine().TextColor(colMuted)
 		case 4:
+			a.jobStatusCell(c, j)
+		case 5:
 			ui.Text(c, jobTime(j)).SingleLine().TextColor(colMuted)
 		}
 	}).Grow(1)

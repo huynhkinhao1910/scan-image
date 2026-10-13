@@ -232,3 +232,93 @@ func withSource(rows []brokenRow, path string, st *sourceStamp) []brokenRow {
 	}
 	return out
 }
+
+func searchApp(names ...string) *app {
+	a := browseApp(tabSearch)
+	for _, n := range names {
+		a.items = append(a.items, search.Item{Name: n, Dir: "/v", Path: "/v/" + n, Size: 10})
+	}
+	return a
+}
+
+func TestBrokenTabLabelCountsFiles(t *testing.T) {
+	if got := brokenTabLabel(nil); got != "File hỏng" {
+		t.Errorf("empty: %q", got)
+	}
+	rows := make([]brokenRow, 100)
+	if got := brokenTabLabel(rows); got != "File hỏng (100)" {
+		t.Errorf("100 rows: %q", got)
+	}
+	a := browseApp(tabSearch)
+	a.broken.rows = []brokenRow{listed("a.png", "Etsy/A/"), listed("b.png", "Etsy/B/")}
+	tt := ui.NewTester(a.view, 1400, 800)
+	if err := tt.Click("File hỏng (2)"); err != nil || a.tab != tabBroken {
+		t.Fatalf("tab label: %v, tab %d, texts %q", err, a.tab, tt.Texts())
+	}
+}
+
+func TestEveryTableNumbersItsRows(t *testing.T) {
+	broken := browseApp(tabBroken)
+	broken.broken.rows = []brokenRow{listed("a.png", "Etsy/A/"), listed("b.png", "Etsy/B/"), listed("c.png", "Etsy/C/")}
+	queue := browseApp(tabQueue)
+	for _, n := range []string{"a.png", "b.png", "c.png"} {
+		queue.up.jobs = append(queue.up.jobs, &uploadJob{Path: "/v/" + n, Key: "Etsy/A/" + n, State: upQueued})
+	}
+	cases := map[string]*app{"File hỏng": broken, "Hàng đợi S3": queue, "Tìm ảnh": searchApp("a.png", "b.png", "c.png")}
+	for name, a := range cases {
+		t.Run(name, func(t *testing.T) {
+			tt := ui.NewTester(a.view, 1600, 900)
+			if _, ok := tt.Find("#"); !ok {
+				t.Fatalf("no # column, texts %q", tt.Texts())
+			}
+			first, ok1 := tt.Find("1")
+			third, ok3 := tt.Find("3")
+			if !ok1 || !ok3 || first.Y >= third.Y {
+				t.Fatalf("row numbers: 1 %v %v, 3 %v %v, texts %q", ok1, first, ok3, third, tt.Texts())
+			}
+		})
+	}
+}
+
+func TestSearchCheckboxesChooseRows(t *testing.T) {
+	a := searchApp("a.png", "b.png", "c.png")
+	tt := ui.NewTester(a.view, 1600, 900)
+
+	for _, n := range []string{"a.png", "c.png"} {
+		if err := tt.Click("Chọn " + n); err != nil {
+			t.Fatalf("checkbox of %s: %v, texts %q", n, err, tt.Texts())
+		}
+	}
+	if a.chosen.Len() != 2 || !a.chosen.Has("/v/a.png") || !a.chosen.Has("/v/c.png") {
+		t.Fatalf("chosen %v", a.selectedPaths())
+	}
+	if !tt.HasText("Upload S3 (2)") {
+		t.Errorf("upload button does not count the ticked rows: %q", tt.Texts())
+	}
+
+	if err := tt.Click("Chọn a.png"); err != nil {
+		t.Fatal(err)
+	}
+	if a.chosen.Len() != 1 || !a.chosen.Has("/v/c.png") {
+		t.Fatalf("after unticking: %v", a.selectedPaths())
+	}
+}
+
+func TestSelectAllChoosesEveryShownRow(t *testing.T) {
+	a := searchApp("a.png", "b.png", "c.png")
+	tt := ui.NewTester(a.view, 1600, 900)
+
+	if err := tt.Click("Chọn tất cả"); err != nil {
+		t.Fatalf("select all: %v, texts %q", err, tt.Texts())
+	}
+	if a.chosen.Len() != 3 || !tt.HasText("Upload S3 (3)") {
+		t.Fatalf("chosen %v, texts %q", a.selectedPaths(), tt.Texts())
+	}
+
+	if err := tt.Click("Chọn tất cả"); err != nil {
+		t.Fatal(err)
+	}
+	if a.chosen.Len() != 0 {
+		t.Fatalf("after unticking all: %v", a.selectedPaths())
+	}
+}

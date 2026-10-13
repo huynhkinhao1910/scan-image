@@ -64,6 +64,13 @@ type brokenState struct {
 	auto autoState
 }
 
+func brokenTabLabel(rows []brokenRow) string {
+	if len(rows) == 0 {
+		return "File hỏng"
+	}
+	return fmt.Sprintf("File hỏng (%d)", len(rows))
+}
+
 func listURL(configured string) string {
 	if u := strings.TrimSpace(configured); u != "" {
 		return u
@@ -409,6 +416,7 @@ func (a *app) confirmPush(c *ui.Context, eligible int) {
 func (a *app) brokenTable(c *ui.Context) {
 	b := &a.broken
 	cols := []ui.TableColumn{
+		numberColumn,
 		{Title: "File", MinWidth: 160},
 		{Title: "Path trên S3", MinWidth: 200},
 		{Title: "Nguồn trên ổ mạng", MinWidth: 240},
@@ -422,15 +430,17 @@ func (a *app) brokenTable(c *ui.Context) {
 			r, sel := b.rows[row], row == b.selected
 			switch col {
 			case 0:
-				nameCell(c, r.Item.File)
+				rowNumber(c, row, sel)
 			case 1:
-				tint(ui.Text(c, r.Item.Key).SingleLine(), sel, colMuted)
+				nameCell(c, r.Item.File)
 			case 2:
-				a.sourceCell(c, row, r, sel)
+				tint(ui.Text(c, r.Item.Key).SingleLine(), sel, colMuted)
 			case 3:
+				a.sourceCell(c, row, r, sel)
+			case 4:
 				text, clr := brokenStatus(r, b.dryRun)
 				tint(ui.Text(c, text).SingleLine().Tooltip(text), sel, clr)
-			case 4:
+			case 5:
 				tint(ui.Text(c, jobTime(r.Job)).SingleLine(), sel, colMuted)
 			}
 		}).Grow(1)

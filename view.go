@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -9,6 +10,7 @@ import (
 	"github.com/isuccesscorp/scan-image/icons"
 	"github.com/isuccesscorp/scan-image/internal/brokenlist"
 	"github.com/isuccesscorp/scan-image/internal/indexer"
+	"github.com/isuccesscorp/scan-image/internal/search"
 )
 
 var (
@@ -43,7 +45,7 @@ func (a *app) view(c *ui.Context) {
 		if a.settingsOpen {
 			a.settingsPanel(c)
 		}
-		ui.Tabs(c, &a.tab, "Tìm ảnh", "File hỏng", queueTabLabel(a.up.jobs))
+		ui.Tabs(c, &a.tab, "Tìm ảnh", brokenTabLabel(a.broken.rows), queueTabLabel(a.up.jobs))
 		switch a.tab {
 		case tabBroken:
 			a.brokenTab(c)
@@ -235,11 +237,17 @@ func (a *app) searchBar(c *ui.Context) {
 		if ui.Checkbox(c, &a.imagesOnly, "Chỉ ảnh").Changed() {
 			a.refreshSearch()
 		}
+		all := a.allChosen()
+		if ui.Checkbox(c, &all, "Chọn tất cả").Disabled(len(a.items) == 0).Changed() {
+			a.chooseAll(all)
+		}
 	})
 }
 
 func (a *app) results(c *ui.Context) {
 	cols := []ui.TableColumn{
+		{ID: "chọn", Width: 40, Fixed: true},
+		numberColumn,
 		{Title: "Tên", MinWidth: 200},
 		{Title: "Thư mục", MinWidth: 200},
 		{Title: "Size", Width: 90, Align: ui.End},
@@ -256,12 +264,16 @@ func (a *app) results(c *ui.Context) {
 				sel := row == a.selected || a.chosen.Has(it.Path)
 				switch col {
 				case 0:
-					ui.Text(c, it.Name).SingleLine()
+					a.chooseBox(c, it)
 				case 1:
-					tint(ui.Text(c, it.Dir).SingleLine(), sel, colMuted)
+					rowNumber(c, row, sel)
 				case 2:
-					tint(ui.Text(c, humanBytes(it.Size)), sel, colMuted)
+					ui.Text(c, it.Name).SingleLine()
 				case 3:
+					tint(ui.Text(c, it.Dir).SingleLine(), sel, colMuted)
+				case 4:
+					tint(ui.Text(c, humanBytes(it.Size)), sel, colMuted)
+				case 5:
 					tint(ui.Text(c, it.ModTime.Format("02/01/2006 15:04")), sel, colMuted)
 				}
 			}).Grow(1)
@@ -287,6 +299,47 @@ func (a *app) results(c *ui.Context) {
 			}
 		})
 	})
+}
+
+var numberColumn = ui.TableColumn{Title: "#", Width: 52, Align: ui.End, Fixed: true}
+
+// rowNumber is the cell of numberColumn: the row's place in the table as shown.
+func rowNumber(c *ui.Context, row int, selected bool) {
+	tint(ui.Text(c, strconv.Itoa(row+1)), selected, colMuted)
+}
+
+// chooseBox ticks a result row in or out of the selection the upload uses.
+func (a *app) chooseBox(c *ui.Context, it search.Item) {
+	on := a.chosen.Has(it.Path)
+	if !ui.Checkbox(c, &on, "").Label("Chọn " + it.Name).Changed() {
+		return
+	}
+	if on {
+		a.chosen.Add(it.Path)
+	} else {
+		a.chosen.Remove(it.Path)
+	}
+}
+
+// allChosen reports whether every shown result is selected.
+func (a *app) allChosen() bool {
+	for _, it := range a.items {
+		if !a.chosen.Has(it.Path) {
+			return false
+		}
+	}
+	return len(a.items) > 0
+}
+
+// chooseAll selects every shown result, or none.
+func (a *app) chooseAll(on bool) {
+	a.clearSelection()
+	if !on {
+		return
+	}
+	for _, it := range a.items {
+		a.chosen.Add(it.Path)
+	}
 }
 
 // calmRows builds fn with a darker accent. A selected table row takes the

@@ -36,7 +36,7 @@ Cấu hình trong Settings → S3 (bucket, region hoặc endpoint, access key; s
 - Đẩy xong, app hỏi lại dung lượng trên S3 và chỉ báo "Xong" khi khớp với file nguồn.
 - 1 phút và 10 phút sau khi đẩy, app hỏi lại dung lượng lần nữa. Trạng thái ghi "chờ kiểm lại" rồi "đã kiểm lại". Nếu file trên S3 đã đổi dung lượng hoặc biến mất, app tự đẩy lại, tối đa 3 lần; quá số đó dòng chuyển thành lỗi "có tiến trình khác ghi đè key này". "Xoá đã xong" giữ lại các dòng còn chờ kiểm. Thoát app thì các lần kiểm còn chờ bị bỏ.
 
-**Tab Tìm ảnh**: chọn file (Cmd/Shift-click) rồi "Upload S3". Một popup mở ra để chọn thư mục đích trong bucket (app quét sẵn các thư mục của bucket, gõ để lọc, gõ tay thư mục mới cũng được). Key = `thư mục đã chọn + tên file`. Mục "Theo cấu trúc share (mặc định)" giữ cách cũ: `<prefix>/<tên share>/<đường dẫn con>`. File đã có trên bucket thì app hỏi trước khi ghi đè. Xếp hàng xong app chuyển sang tab Hàng đợi S3. File nào được đẩy đúng vào key đang có trong danh sách file hỏng (cùng thư mục, cùng tên) thì đẩy xong app báo server như khi đẩy từ tab File hỏng; muốn vậy danh sách phải đã được lấy trước khi bấm đẩy.
+**Tab Tìm ảnh**: chọn file bằng ô tick ở đầu mỗi dòng, bằng "Chọn tất cả" (mọi dòng đang hiện, tối đa 2.000), hoặc Cmd/Shift-click, rồi "Upload S3". Một popup mở ra để chọn thư mục đích trong bucket (app quét sẵn các thư mục của bucket, gõ để lọc, gõ tay thư mục mới cũng được). Key = `thư mục đã chọn + tên file`. Mục "Theo cấu trúc share (mặc định)" giữ cách cũ: `<prefix>/<tên share>/<đường dẫn con>`. File đã có trên bucket thì app hỏi trước khi ghi đè. Xếp hàng xong app chuyển sang tab Hàng đợi S3. File nào được đẩy đúng vào key đang có trong danh sách file hỏng (cùng thư mục, cùng tên) thì đẩy xong app báo server như khi đẩy từ tab File hỏng; muốn vậy danh sách phải đã được lấy trước khi bấm đẩy.
 
 ## Yêu cầu
 - macOS, **Go ≥ 1.27.1** (MyGo v0.4.6 yêu cầu): `brew install go` hoặc tải ở go.dev
@@ -61,7 +61,7 @@ App quét bằng lister `getattrlistbulk` (`source.LocalFS{Bulk: true}`): một 
 main.go / app.go / view.go   UI MyGo: kết nối, quét, cards, search, bảng kết quả, Settings xổ xuống
 tray.go                      icon thanh menu và menu chạy nền
 icons/                       icon Lucide (ISC) nhúng vào binary
-upload.go                    hàng đợi upload S3 (3 file song song, tiến độ, huỷ, thử lại)
+upload.go                    hàng đợi upload S3 (8 file song song, tiến độ, huỷ, thử lại)
 queue_view.go                tab Hàng đợi S3, nút copy tên file
 recheck.go                   kiểm lại file trên S3 sau khi đẩy, đẩy lại nếu bị ghi đè
 broken*.go                   tab File hỏng: danh sách, khớp tên, tìm theo ngày, đẩy

@@ -20,6 +20,9 @@ import (
 
 const appName = "ScanImage"
 
+// ponytail: fixed; make it a setting when one number does not suit every line.
+const uploadWorkers = 8
+
 type uploadState int
 
 const (
@@ -289,7 +292,7 @@ func (a *app) startUploader(cfg s3up.Config) {
 		ctx, cancel := context.WithCancel(context.Background())
 		a.up.cancel = cancel
 		a.up.queue = make(chan *uploadJob, 1024)
-		for w := 0; w < 3; w++ {
+		for w := 0; w < uploadWorkers; w++ {
 			go a.uploadWorker(ctx)
 		}
 	})
