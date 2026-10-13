@@ -73,14 +73,16 @@ func (r brokenRow) source() (search.Item, bool) {
 	return search.Item{}, false
 }
 
-// hasSeveral reports that more than one file has the row's exact name, so the
-// newest of them is a guess the user has to see before it is pushed.
+// hasSeveral reports that more than one file has the row's exact name. The
+// newest of them is pushed without asking: the user chose that on 2026-10-13,
+// knowing that whoever can write a newer file of that name to the share then
+// decides what goes to the bucket.
 func (r brokenRow) hasSeveral() bool { return len(r.Cands) > 1 }
 
 // wantsConfirm is whether the row's kind is pushed only after a confirmation:
-// several exact copies, or look-alikes alone.
+// look-alikes alone, whose name is not the listed one.
 func (r brokenRow) wantsConfirm() bool {
-	return r.hasSeveral() || (len(r.Cands) == 0 && len(r.Near) > 0)
+	return len(r.Cands) == 0 && len(r.Near) > 0
 }
 
 func (r brokenRow) needsConfirm() bool {
@@ -144,12 +146,12 @@ func brokenStatus(r brokenRow, dry bool) (string, ui.Color) {
 		return "Chưa tìm thấy trên ổ mạng", colOrange
 	case src.Size == 0:
 		return "File nguồn rỗng (0 byte), không đẩy", colPink
-	case r.needsConfirm() && r.hasSeveral():
-		return fmt.Sprintf("Có %d bản, cần xác nhận", len(r.Cands)), colOrange
 	case r.needsConfirm():
 		return "Tên gần giống, cần xác nhận", colOrange
 	case dry:
 		return fmt.Sprintf("sẽ đẩy → %s · %s", r.Item.Key, humanBytes(src.Size)), colMuted
+	case r.hasSeveral():
+		return fmt.Sprintf("Sẵn sàng · lấy bản mới nhất trong %d bản", len(r.Cands)), colMuted
 	}
 	return "Sẵn sàng", colMuted
 }
@@ -206,19 +208,9 @@ const maxCandidates = 50
 
 // lookAlikeCount is the rows waiting for the user to confirm a look-alike.
 func lookAlikeCount(rows []brokenRow) int {
-	return countPending(rows, false)
-}
-
-// multiCount is the rows waiting for the user to confirm one of several exact
-// copies.
-func multiCount(rows []brokenRow) int {
-	return countPending(rows, true)
-}
-
-func countPending(rows []brokenRow, several bool) int {
 	n := 0
 	for _, r := range rows {
-		if r.needsConfirm() && r.hasSeveral() == several && !jobBlocks(r.Job) {
+		if r.needsConfirm() && !jobBlocks(r.Job) {
 			n++
 		}
 	}
@@ -226,33 +218,23 @@ func countPending(rows []brokenRow, several bool) int {
 }
 
 func dryRunSummary(rows []brokenRow) string {
-	missing, look, several := missingCount(rows), 0, 0
+	missing, look := missingCount(rows), 0
 	for _, r := range rows {
-		switch {
-		case !r.needsConfirm():
-		case r.hasSeveral():
-			several++
-		default:
+		if r.needsConfirm() {
 			look++
 		}
 	}
-	s := fmt.Sprintf("%d file sẽ đẩy, %d chưa tìm thấy", len(rows)-missing-look-several, missing)
+	s := fmt.Sprintf("%d file sẽ đẩy, %d chưa tìm thấy", len(rows)-missing-look, missing)
 	if look > 0 {
 		s += fmt.Sprintf(", %d file tên gần giống cần xác nhận", look)
-	}
-	if several > 0 {
-		s += fmt.Sprintf(", %d file có nhiều bản cần xác nhận", several)
 	}
 	return s
 }
 
-func confirmMessage(eligible, lookAlike, several int, bucket string, scanning bool) string {
+func confirmMessage(eligible, lookAlike int, bucket string, scanning bool) string {
 	msg := fmt.Sprintf("Ghi đè %d file trên bucket %s?", eligible, bucket)
 	if lookAlike > 0 {
 		msg += fmt.Sprintf(" %d file tên gần giống cần xác nhận, không nằm trong lượt này.", lookAlike)
-	}
-	if several > 0 {
-		msg += fmt.Sprintf(" %d file có nhiều bản cần xác nhận, không nằm trong lượt này.", several)
 	}
 	if scanning {
 		msg += " Index đang quét dở: bản mới hơn của file có thể chưa được tìm thấy."

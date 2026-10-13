@@ -235,9 +235,7 @@ func TestRowSourceAndEligibility(t *testing.T) {
 	}{
 		{"missing", brokenRow{}, "", false, false},
 		{"exact beats look-alike", brokenRow{Cands: exact[:1], Near: near}, "/v/a.psd", false, true},
-		{"several exact unconfirmed", brokenRow{Cands: exact, Near: near}, "/v/a.psd", true, false},
-		{"several exact confirmed", brokenRow{Cands: exact, Confirm: "/v/a.psd"}, "/v/a.psd", false, true},
-		{"several exact, confirmation of an older one", brokenRow{Cands: exact, Confirm: "/v/b/a.psd"}, "/v/a.psd", true, false},
+		{"several exact take the newest unasked", brokenRow{Cands: exact, Near: near}, "/v/a.psd", false, true},
 		{"look-alike unconfirmed", brokenRow{Near: near}, "/v/Mau a.psd", true, false},
 		{"look-alike confirmed", brokenRow{Near: near, Confirm: "/v/Mau a.psd"}, "/v/Mau a.psd", false, true},
 		{"confirmation of another path", brokenRow{Near: near, Confirm: "/v/other.psd"}, "/v/Mau a.psd", true, false},
@@ -307,7 +305,7 @@ func TestDryRunSummaryCountsLookAlikesSeparately(t *testing.T) {
 	}
 }
 
-func TestMultiCandidateRowsAreCountedAndSummarisedSeparately(t *testing.T) {
+func TestMultiCandidateRowsCountAsReady(t *testing.T) {
 	one := []search.Item{cand("/v/a.png", 1)}
 	two := []search.Item{cand("/v/new/a.png", 9), cand("/v/a.png", 1)}
 	near := []search.Item{cand("/v/A.png", 1)}
@@ -316,52 +314,25 @@ func TestMultiCandidateRowsAreCountedAndSummarisedSeparately(t *testing.T) {
 		{Cands: two, Confirm: "/v/new/a.png"},
 		{Cands: two, Job: &uploadJob{State: upQueued}},
 	}
-	if got := multiCount(rows); got != 2 {
-		t.Errorf("multiCount = %d, want 2", got)
-	}
 	if got := lookAlikeCount(rows); got != 1 {
 		t.Errorf("lookAlikeCount = %d, want 1", got)
 	}
-	want := "2 file sẽ đẩy, 1 chưa tìm thấy, 1 file tên gần giống cần xác nhận, 3 file có nhiều bản cần xác nhận"
+	want := "5 file sẽ đẩy, 1 chưa tìm thấy, 1 file tên gần giống cần xác nhận"
 	if got := dryRunSummary(rows); got != want {
 		t.Errorf("summary = %q, want %q", got, want)
 	}
 }
 
-func TestMultiCandidateStatusNamesTheCopyCount(t *testing.T) {
+func TestMultiCandidateStatusSaysTheNewestIsTaken(t *testing.T) {
 	r := fileRow("a.png", cand("/v/new/a.png", 9), cand("/v/a.png", 1), cand("/w/a.png", 2))
-	for _, dry := range []bool{false, true} {
-		if got, _ := brokenStatus(r, dry); got != "Có 3 bản, cần xác nhận" {
-			t.Errorf("status(dry=%v) = %q", dry, got)
-		}
+	if got, _ := brokenStatus(r, false); got != "Sẵn sàng · lấy bản mới nhất trong 3 bản" {
+		t.Errorf("status = %q", got)
 	}
-	r.Confirm = "/v/new/a.png"
-	if got, _ := brokenStatus(r, false); got != "Sẵn sàng" {
-		t.Errorf("confirmed status = %q", got)
+	if got, _ := brokenStatus(r, true); !strings.HasPrefix(got, "sẽ đẩy → X/a.png") {
+		t.Errorf("dry status = %q", got)
 	}
-}
-
-func TestSettleConfirmForSeveralExactCandidates(t *testing.T) {
-	old := cand("/v/a.png", 1)
-	cur := cand("/v/b/a.png", 5)
-	planted := cand("/v/planted/a.png", 99)
-	tests := []struct {
-		name string
-		row  brokenRow
-		want string
-	}{
-		{"same newest stays", fileRow("a.png", cur, old), "/v/b/a.png"},
-		{"a newer file appeared", fileRow("a.png", planted, cur, old), ""},
-		{"back to a single exact file", fileRow("a.png", cur), ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			r := tc.row
-			r.Confirm = "/v/b/a.png"
-			if got := settleConfirm(r).Confirm; got != tc.want {
-				t.Errorf("confirm = %q, want %q", got, tc.want)
-			}
-		})
+	if got, _ := brokenStatus(fileRow("a.png", cand("/v/a.png", 1)), false); got != "Sẵn sàng" {
+		t.Errorf("single copy status = %q", got)
 	}
 }
 
@@ -378,7 +349,7 @@ func TestConfirmSourceSetsThePathOfTheCurrentSource(t *testing.T) {
 	a.confirmSource(-1)
 	a.confirmSource(9)
 	got := []string{a.broken.rows[0].Confirm, a.broken.rows[1].Confirm, a.broken.rows[2].Confirm}
-	if want := []string{"/v/new/a.png", "/v/B.png", ""}; !slices.Equal(got, want) {
+	if want := []string{"", "/v/B.png", ""}; !slices.Equal(got, want) {
 		t.Errorf("confirms = %q, want %q", got, want)
 	}
 	if len(eligibleRows(a.broken.rows)) != 3 {
@@ -390,18 +361,16 @@ func TestConfirmMessage(t *testing.T) {
 	tests := []struct {
 		name                string
 		eligible, lookAlike int
-		multi               int
 		scanning            bool
 		has, lacks          []string
 	}{
-		{"plain", 3, 0, 0, false, []string{"Ghi đè 3 file trên bucket prod"}, []string{"gần giống", "nhiều bản", "quét dở"}},
-		{"look-alikes", 3, 2, 0, false, []string{"2 file tên gần giống cần xác nhận"}, []string{"quét dở", "nhiều bản"}},
-		{"several copies", 3, 0, 4, false, []string{"4 file có nhiều bản cần xác nhận"}, []string{"gần giống", "quét dở"}},
-		{"scanning", 3, 0, 0, true, []string{"Index đang quét dở: bản mới hơn của file có thể chưa được tìm thấy."}, nil},
+		{"plain", 3, 0, false, []string{"Ghi đè 3 file trên bucket prod"}, []string{"gần giống", "nhiều bản", "quét dở"}},
+		{"look-alikes", 3, 2, false, []string{"2 file tên gần giống cần xác nhận"}, []string{"quét dở", "nhiều bản"}},
+		{"scanning", 3, 0, true, []string{"Index đang quét dở: bản mới hơn của file có thể chưa được tìm thấy."}, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := confirmMessage(tc.eligible, tc.lookAlike, tc.multi, "prod", tc.scanning)
+			got := confirmMessage(tc.eligible, tc.lookAlike, "prod", tc.scanning)
 			for _, s := range tc.has {
 				if !strings.Contains(got, s) {
 					t.Errorf("%q lacks %q", got, s)

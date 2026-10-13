@@ -13,7 +13,7 @@ func autoRow(key string, cands ...search.Item) brokenRow {
 	return brokenRow{Item: brokenlist.Item{File: "a.png", Key: key}, Cands: cands}
 }
 
-func TestAutoRowsPushesOnlyTrustedRowsNotPushedBefore(t *testing.T) {
+func TestAutoRowsPushesExactMatchesNotPushedBefore(t *testing.T) {
 	one := cand("/v/a.png", 10)
 	rows := []brokenRow{
 		autoRow("ready"),
@@ -33,8 +33,8 @@ func TestAutoRowsPushesOnlyTrustedRowsNotPushedBefore(t *testing.T) {
 
 	idx, repeated := autoRows(rows, pushed)
 
-	if want := []int{1, 5, 6}; !slices.Equal(idx, want) {
-		t.Errorf("rows to push = %v, want %v: one exact copy, and not the same source twice", idx, want)
+	if want := []int{1, 2, 5, 6}; !slices.Equal(idx, want) {
+		t.Errorf("rows to push = %v, want %v: exact names (the newest of several), and not the same source twice", idx, want)
 	}
 	if repeated != 1 {
 		t.Errorf("repeated = %d, want 1 (the row the server still lists after its push)", repeated)
@@ -67,6 +67,7 @@ func TestAutoMessage(t *testing.T) {
 	rows := []brokenRow{
 		autoRow("missing"),
 		autoRow("several", cand("/v/a.png", 1), cand("/v/b/a.png", 2)),
+		{Item: brokenlist.Item{Key: "lookalike"}, Near: []search.Item{cand("/v/A.png", 1)}},
 	}
 	got := autoMessage(at, 3, 1, rows)
 	want := "Tự động 14:05: đẩy 3 file, 1 chưa tìm thấy, 1 cần xác nhận, bỏ qua 1 file đã đẩy mà server vẫn liệt kê"

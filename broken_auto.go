@@ -91,7 +91,7 @@ func autoMessage(at time.Time, queued, repeated int, rows []brokenRow) string {
 	if n := missingCount(rows); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d chưa tìm thấy", n))
 	}
-	if n := lookAlikeCount(rows) + multiCount(rows); n > 0 {
+	if n := lookAlikeCount(rows); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d cần xác nhận", n))
 	}
 	if repeated > 0 {
@@ -105,7 +105,7 @@ func autoMessage(at time.Time, queued, repeated int, rows []brokenRow) string {
 
 func autoConfirmText(bucket string) string {
 	return fmt.Sprintf("Mỗi %d phút app sẽ tự lấy danh sách, tìm file trên ổ mạng và GHI ĐÈ lên bucket %s mà không hỏi lại. "+
-		"Chỉ đẩy dòng có đúng một file trùng tên chính xác; dòng tên gần giống hoặc có nhiều bản vẫn chờ bạn xác nhận.",
+		"Chỉ đẩy file trùng tên chính xác; có nhiều bản thì lấy bản sửa gần nhất. Dòng tên gần giống vẫn chờ bạn xác nhận.",
 		int(autoEvery.Minutes()), strings.TrimSpace(bucket))
 }
 
@@ -196,7 +196,7 @@ func (a *app) autoAfterQuick() {
 }
 
 // autoPush ends a cycle by queueing what may be sent without a person looking.
-// It waits for a complete index: a partial one can hide a second copy of a
+// It waits for a complete index: a partial one can hide a newer copy of a
 // file.
 func (a *app) autoPush() {
 	b := &a.broken

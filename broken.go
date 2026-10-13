@@ -400,7 +400,7 @@ func (a *app) confirmPush(c *ui.Context, eligible int) {
 	ui.Modal(c, &b.confirm, func() {
 		ui.Text(c, "Đẩy file hỏng lên S3").Bold()
 		bucket := strings.TrimSpace(a.up.cfg.Bucket)
-		ui.Text(c, confirmMessage(eligible, lookAlikeCount(b.rows), multiCount(b.rows), bucket, a.st.Scanning)).Wrap()
+		ui.Text(c, confirmMessage(eligible, lookAlikeCount(b.rows), bucket, a.st.Scanning)).Wrap()
 		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
 			if ui.Button(c, "Huỷ").Clicked() {
 				b.confirm = false
