@@ -13,7 +13,8 @@ import (
 
 // Entry is one item of a directory listing.
 type Entry struct {
-	Name    string
+	Name string
+	// Size is the file size in bytes; it is 0 for directories.
 	Size    int64
 	ModTime time.Time
 	IsDir   bool

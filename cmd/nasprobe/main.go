@@ -6,9 +6,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -18,40 +20,74 @@ import (
 	"github.com/isuccesscorp/scan-image/internal/source"
 )
 
+const maxShownFailures = 10
+
+// countSink counts entries, cancels once limit is reached and queues every
+// subdirectory. It keeps the first listings that failed, so a lister that
+// cannot read some folders shows which ones and why.
+type countSink struct {
+	seen     *atomic.Int64
+	limit    int64
+	cancel   context.CancelFunc
+	failures []string
+}
+
+func (c *countSink) Listed(d scanner.Dir, es []source.Entry) []scanner.Dir {
+	if c.seen.Add(int64(len(es))) >= c.limit {
+		c.cancel()
+	}
+	var subs []scanner.Dir
+	for _, e := range es {
+		if e.IsDir {
+			subs = append(subs, scanner.Dir{Path: filepath.Join(d.Path, e.Name)})
+		}
+	}
+	return subs
+}
+
+func (c *countSink) Failed(d scanner.Dir, err error) {
+	if errors.Is(err, context.Canceled) || len(c.failures) == maxShownFailures {
+		return
+	}
+	c.failures = append(c.failures, fmt.Sprintf("%s: %v", d.Path, err))
+}
+
 func main() {
 	path := flag.String("path", "", "mounted folder to probe, e.g. /Volumes/Photos")
 	limit := flag.Int64("limit", 20000, "stop after this many entries per run")
 	workerList := flag.String("workers", "8,32,64", "comma-separated worker counts to compare")
+	listerList := flag.String("lister", "readdir", "comma-separated listers to compare: readdir, bulk")
 	flag.Parse()
 	if *path == "" {
 		fmt.Fprintln(os.Stderr, "missing -path")
 		os.Exit(2)
 	}
 
-	fmt.Printf("%-8s %10s %8s %8s %12s %8s\n", "workers", "entries", "dirs", "errors", "entries/s", "time")
-	for _, f := range strings.Split(*workerList, ",") {
-		w, err := strconv.Atoi(strings.TrimSpace(f))
-		if err != nil || w <= 0 {
-			continue
+	fmt.Printf("%-8s %-8s %10s %8s %8s %12s %8s\n", "lister", "workers", "entries", "dirs", "errors", "entries/s", "time")
+	for _, lister := range strings.Split(*listerList, ",") {
+		lister = strings.TrimSpace(lister)
+		if lister != "readdir" && lister != "bulk" {
+			fmt.Fprintf(os.Stderr, "unknown lister %q (want readdir or bulk)\n", lister)
+			os.Exit(2)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		var seen atomic.Int64
-		s := &scanner.Scanner{Src: source.LocalFS{SkipHidden: true}, Workers: w}
-		var nextID atomic.Uint32
-		sink := func(_ uint32, es []source.Entry) []uint32 {
-			ids := make([]uint32, len(es))
-			for i := range ids {
-				ids[i] = nextID.Add(1)
+		for _, f := range strings.Split(*workerList, ",") {
+			w, err := strconv.Atoi(strings.TrimSpace(f))
+			if err != nil || w <= 0 {
+				continue
 			}
-			if seen.Add(int64(len(es))) >= *limit {
-				cancel()
+			ctx, cancel := context.WithCancel(context.Background())
+			var seen atomic.Int64
+			src := source.LocalFS{SkipHidden: true, Bulk: lister == "bulk"}
+			s := &scanner.Scanner{Src: src, Workers: w}
+			sink := &countSink{seen: &seen, limit: *limit, cancel: cancel}
+			_ = s.Run(ctx, []scanner.Dir{{Path: *path}}, sink)
+			cancel()
+			p := s.Progress()
+			fmt.Printf("%-8s %-8d %10d %8d %8d %12.0f %8s\n", lister, w, p.Files+p.Dirs, p.Dirs, p.Errors, p.FilesPerSec(), p.Elapsed.Round(time.Millisecond))
+			for _, f := range sink.failures {
+				fmt.Println("  failed:", f)
 			}
-			return ids
 		}
-		_ = s.Run(ctx, []scanner.Root{{Path: *path}}, sink)
-		cancel()
-		p := s.Progress()
-		fmt.Printf("%-8d %10d %8d %8d %12.0f %8s\n", w, p.Files+p.Dirs, p.Dirs, p.Errors, p.FilesPerSec(), p.Elapsed.Round(time.Millisecond))
 	}
 	fmt.Println("\nTip: macOS caches listings; re-run after a few minutes or on another folder for honest numbers.")
 }

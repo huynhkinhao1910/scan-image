@@ -3,9 +3,11 @@ package netshare
 import (
 	"context"
 	"errors"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const mountOut = `/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
@@ -101,5 +103,63 @@ func TestServers(t *testing.T) {
 	ss, err := c.Servers(context.Background())
 	if err != nil || len(ss) != 2 || ss[0].Host != "192.168.101.251" || ss[1].Host != "10.0.0.9" {
 		t.Errorf("servers %+v, %v", ss, err)
+	}
+}
+
+// listenSMB stands in for port 445, which tests cannot bind: it points the
+// package-level smbPort seam at a local listener.
+func listenSMB(t *testing.T) (host string, ln net.Listener) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	h, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := smbPort
+	smbPort = port
+	t.Cleanup(func() { smbPort = old })
+	return h, ln
+}
+
+func TestReachableIsTrueWhenSMBPortAcceptsConnections(t *testing.T) {
+	host, _ := listenSMB(t)
+
+	if !Reachable(context.Background(), host) {
+		t.Error("Reachable = false for a host that accepts TCP on the SMB port")
+	}
+}
+
+func TestReachableIsFalseWhenNothingListensOnSMBPort(t *testing.T) {
+	host, ln := listenSMB(t)
+	_ = ln.Close()
+
+	start := time.Now()
+	if Reachable(context.Background(), host) {
+		t.Error("Reachable = true although the port is closed")
+	}
+	if d := time.Since(start); d > 3500*time.Millisecond {
+		t.Errorf("took %v, want a refused connection to fail well inside the 3s dial timeout", d)
+	}
+}
+
+func TestReachableIsFalseWhenContextIsCancelled(t *testing.T) {
+	host, _ := listenSMB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if Reachable(ctx, host) {
+		t.Error("Reachable = true with a cancelled context")
+	}
+}
+
+func TestReachableIsFalseForEmptyHost(t *testing.T) {
+	listenSMB(t)
+
+	if Reachable(context.Background(), "") {
+		t.Error("Reachable = true for an empty host")
 	}
 }

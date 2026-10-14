@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -21,6 +22,28 @@ type Runner func(ctx context.Context, name string, args ...string) ([]byte, erro
 // Exec runs real commands.
 func Exec(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// smbPort is the TCP port SMB servers listen on; a variable so tests can
+// point Reachable at a local listener.
+var smbPort = "445"
+
+const reachableTimeout = 3 * time.Second
+
+// Reachable reports whether host accepts TCP connections on the SMB port.
+// It never mounts anything and so never shows a dialog; call it before
+// touching a share while the VPN may be off.
+func Reachable(ctx context.Context, host string) bool {
+	if host == "" || ctx.Err() != nil {
+		return false
+	}
+	d := net.Dialer{Timeout: reachableTimeout}
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, smbPort))
+	if err != nil {
+		return false
+	}
+	_ = conn.Close() // probe only; nothing was exchanged
+	return true
 }
 
 // Mount is one mounted network volume.

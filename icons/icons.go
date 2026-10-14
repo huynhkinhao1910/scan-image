@@ -34,6 +34,7 @@ var (
 	Grid        = load("layout-grid")
 	External    = load("external-link")
 	Close       = load("x")
+	Copy        = load("copy")
 	Check       = load("circle-check")
 	Alert       = load("circle-alert")
 	Image       = load("image")
