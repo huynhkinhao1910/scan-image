@@ -33,6 +33,9 @@ type BuildOptions struct {
 	// anyway, together with everything below it. VerifySlots == 0 disables
 	// the rotation.
 	VerifySlot, VerifySlots uint32
+	// Recent, when positive, makes the build a quick pass over what changed
+	// within that time (see Builder.unchanged). It needs Reuse.
+	Recent time.Duration
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 }
@@ -93,7 +96,11 @@ func NewBuilder(old *Index, opt BuildOptions) *Builder {
 	}
 	b.first = firstChildren(old.parent)
 	if opt.Reuse {
-		b.hot = hotEntries(old, opt.Now().Add(-ColdAge).Unix())
+		age := ColdAge
+		if opt.Recent > 0 {
+			age = opt.Recent
+		}
+		b.hot = hotEntries(old, opt.Now().Add(-age).Unix(), opt.Recent <= 0)
 		b.verifying = map[uint32]struct{}{}
 	}
 	b.oldRoots = map[string]Root{}
@@ -118,17 +125,17 @@ func firstChildren(parent []uint32) []uint32 {
 }
 
 // hotEntries marks every old entry that has, in itself or anywhere below it,
-// an mtime at or after cutoff or a directory without flagStable. Children
-// have higher ids than their parent, so one backward pass carries the mark
-// up the tree.
-func hotEntries(old *Index, cutoff int64) []bool {
+// an mtime at or after cutoff or, when unstable is set, a directory without
+// flagStable. Children have higher ids than their parent, so one backward
+// pass carries the mark up the tree.
+func hotEntries(old *Index, cutoff int64, unstable bool) []bool {
 	hot := make([]bool, len(old.parent))
 	for i := len(hot) - 1; i >= 0; i-- {
 		p := old.parent[i]
 		if p == NoParent {
 			continue
 		}
-		if old.mtime[i] >= cutoff || old.flags[i]&(flagDir|flagStable) == flagDir {
+		if old.mtime[i] >= cutoff || unstable && old.flags[i]&(flagDir|flagStable) == flagDir {
 			hot[i] = true
 		}
 		if hot[i] {
@@ -322,12 +329,21 @@ func (b *Builder) subdirsLocked(dir, prev, first uint32, entries []source.Entry)
 // unchanged reports whether old directory o may stand in for the listed
 // entry e: its own listing is proven current by the mtime, and it is either
 // a leaf or the top of a cold branch.
+//
+// A recent pass (BuildOptions.Recent) draws the line elsewhere. It lists
+// every directory that holds something of the last Recent, leaves included: a
+// file overwritten in place does not touch its directory. Everything else
+// with the same mtime is copied, also a directory without flagStable, which
+// keeps its flags and is left to the next usual pass.
 func (b *Builder) unchanged(o uint32, e source.Entry) bool {
 	old := b.old
-	if !b.opt.Reuse || old.flags[o]&flagStable == 0 || old.mtime[o] != e.ModTime.Unix() {
+	if !b.opt.Reuse || old.mtime[o] != e.ModTime.Unix() {
 		return false
 	}
-	return !b.hot[o] || !b.hasSubdir(o)
+	if b.opt.Recent > 0 {
+		return !b.hot[o]
+	}
+	return old.flags[o]&flagStable != 0 && (!b.hot[o] || !b.hasSubdir(o))
 }
 
 // verifyDue reports whether the rotation forces a listing of the directory

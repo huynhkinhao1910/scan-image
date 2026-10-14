@@ -3,6 +3,7 @@ package s3up
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/xml"
 	"fmt"
@@ -67,6 +68,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+		w.Header().Set("ETag", fmt.Sprintf(`"%x"`, md5.Sum(b)))
 	case r.Method == "PUT" && q.Get("uploadId") != "":
 		if f.failPut > 0 {
 			f.failPut--
@@ -326,5 +328,30 @@ func TestUploadRefusesEmptyFile(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("an empty file reached the bucket: %d requests", calls)
+	}
+}
+
+func TestStatTellsSizeAndETag(t *testing.T) {
+	f, c, _, _ := setup(t, 10)
+	f.objects["k.jpg"] = []byte("hello")
+
+	got, ok, err := c.Stat(context.Background(), "k.jpg")
+
+	want := Object{Size: 5, ETag: `"5d41402abc4b2a76b9719d911017c592"`}
+	if err != nil || !ok || got != want {
+		t.Fatalf("Stat = %+v, %v, %v; want %+v", got, ok, err, want)
+	}
+	if _, ok, err := c.Stat(context.Background(), "gone.jpg"); err != nil || ok {
+		t.Fatalf("missing object: ok %v err %v", ok, err)
+	}
+}
+
+func TestUploadWithVerifyReturnsTheETagOnTheBucket(t *testing.T) {
+	_, c, local, data := setup(t, 1000)
+
+	res, err := c.UploadWith(context.Background(), local, "k.jpg", UploadOptions{Verify: true}, nil)
+
+	if want := fmt.Sprintf(`"%x"`, md5.Sum(data)); err != nil || res.ETag != want {
+		t.Fatalf("ETag %q err %v, want %q", res.ETag, err, want)
 	}
 }

@@ -274,7 +274,8 @@ func (a *app) pushBroken() {
 }
 
 // pushRows queues the rows at idx, each from its current source to its key,
-// and remembers what was pushed. It returns the jobs as enqueueUploads does.
+// and remembers what was pushed. The server lists these files as missing, so
+// a source edited since it was matched goes up as it is now. It returns the jobs as enqueueUploads does.
 // UI thread only.
 func (a *app) pushRows(cfg s3up.Config, idx []int) []*uploadJob {
 	b := &a.broken
@@ -287,6 +288,7 @@ func (a *app) pushRows(cfg s3up.Config, idx []int) []*uploadJob {
 			Key:    r.Item.Key,
 			Opt:    s3up.UploadOptions{Overwrite: true, Verify: true},
 			Expect: &sourceStamp{Size: src.Size, ModTime: src.ModTime},
+			Fresh:  true,
 		}
 	}
 	jobs := a.enqueueUploads(cfg, specs)

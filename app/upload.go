@@ -41,7 +41,7 @@ type sourceStamp struct {
 	ModTime time.Time
 }
 
-var errSourceChanged = errors.New("File nguồn đã đổi từ lúc khớp, lấy lại danh sách")
+var errSourceChanged = errors.New("File nguồn đã đổi từ lúc khớp, bấm Thử lại lỗi để đẩy bản hiện tại")
 
 // check fails when the file at path is no longer the one that was matched.
 // A symbolic link never passes: the match was on a file.
@@ -56,6 +56,42 @@ func (s sourceStamp) check(path string) error {
 	return nil
 }
 
+// sourceSettle is how long a changed source must have been left alone before
+// it is pushed as it is now: a file still being saved would go up half
+// written.
+// ponytail: judged by the share's clock against this Mac's; compare two stats
+// some seconds apart if the clocks drift.
+const sourceSettle = 2 * time.Minute
+
+// sourceChanged reports a job that failed because its source is no longer the
+// file that was matched.
+func sourceChanged(j *uploadJob) bool {
+	return j.State == upFailed && j.Err == errSourceChanged.Error()
+}
+
+// checkSource fails unless the job's source is still the file that was
+// matched. A fresh job takes a changed file as it is now, once it has been
+// still for sourceSettle. Off the UI thread.
+func checkSource(j *uploadJob, now time.Time) error {
+	if j.Expect == nil {
+		return nil
+	}
+	err := j.Expect.check(j.Path)
+	if !j.Fresh || !errors.Is(err, errSourceChanged) {
+		return err
+	}
+	st, err := os.Lstat(j.Path)
+	switch {
+	case err != nil:
+		return err
+	case !st.Mode().IsRegular():
+		return errSourceChanged
+	case now.Sub(st.ModTime()) < sourceSettle:
+		return fmt.Errorf("File nguồn vừa được sửa lúc %s, chờ ghi xong rồi thử lại", st.ModTime().Format("15:04:05"))
+	}
+	return nil
+}
+
 // uploadJob carries the config confirmed when it was queued, so editing the
 // settings later cannot redirect it.
 type uploadJob struct {
@@ -64,17 +100,27 @@ type uploadJob struct {
 	Opt    s3up.UploadOptions
 	Cfg    s3up.Config
 	Expect *sourceStamp
-	Size   int64
-	Sent   int64
-	State  uploadState
-	Err    string
-	Done   time.Time
+	// Fresh lets the job take a source that changed since it was matched,
+	// as the file is now. Set for a file the server lists as missing, and
+	// when a job is sent again after failing on a changed source.
+	Fresh bool
+	Size  int64
+	// ETag is what the bucket held right after the push, "" when the push was
+	// not verified.
+	ETag  string
+	Sent  int64
+	State uploadState
+	Err   string
+	Done  time.Time
 
 	// Checks counts the looks at the bucket after the push that found the
 	// object intact; Repush, how often it was sent again because one did not.
 	Checks   int
 	Repush   int
 	checking bool
+	// superseded is set when a newer upload to the same key was queued: this
+	// job's source is the older one and must not be sent again.
+	superseded bool
 }
 
 type uploads struct {
@@ -228,12 +274,14 @@ func (a *app) uploadSelected() {
 }
 
 // uploadSpec is one file to send to an exact key with explicit options.
-// Expect, when set, is what the source must still look like when the job runs.
+// Expect, when set, is what the source must still look like when the job runs;
+// Fresh lets a source that changed since go up as it is now (uploadJob.Fresh).
 type uploadSpec struct {
 	Path   string
 	Key    string
 	Opt    s3up.UploadOptions
 	Expect *sourceStamp
+	Fresh  bool
 }
 
 // queueMessage reports how many of the jobs enqueueUploads returned were
@@ -254,19 +302,20 @@ func queueMessage(jobs []*uploadJob) string {
 
 // enqueueUploads queues one job per spec, each carrying cfg, and returns them
 // in the same order. A spec whose (path, key) is already queued or running
-// gets a nil entry. A failed job for the same key is cancelled so a retry
-// cannot overwrite the new upload with an older source. UI thread only.
+// gets a nil entry. Every older job for the same key is superseded, so its
+// older source cannot overwrite the new upload: a failed one, and one waiting
+// to be sent again, is cancelled; a finished one is no longer watched. A spec
+// whose same source failed as changed since it was matched is queued fresh.
+// UI thread only.
 func (a *app) enqueueUploads(cfg s3up.Config, specs []uploadSpec) []*uploadJob {
 	type pathKey struct{ path, key string }
 	queued := map[pathKey]bool{}
-	failed := map[string][]*uploadJob{}
+	older := map[string][]*uploadJob{}
 	for _, j := range a.up.jobs {
-		switch j.State {
-		case upQueued, upRunning:
+		if j.State == upQueued || j.State == upRunning {
 			queued[pathKey{j.Path, j.Key}] = true
-		case upFailed:
-			failed[j.Key] = append(failed[j.Key], j)
 		}
+		older[j.Key] = append(older[j.Key], j)
 	}
 	a.startUploader(cfg)
 	jobs := make([]*uploadJob, len(specs))
@@ -276,14 +325,20 @@ func (a *app) enqueueUploads(cfg s3up.Config, specs []uploadSpec) []*uploadJob {
 			continue
 		}
 		queued[k] = true
-		for _, old := range failed[sp.Key] {
-			old.State = upCanceled
+		fresh := sp.Fresh
+		for _, old := range older[sp.Key] {
+			fresh = fresh || sourceChanged(old) && old.Path == sp.Path
+			if old.State == upFailed || old.State == upQueued && old.Repush > 0 {
+				old.State = upCanceled
+			}
+			old.superseded = true
 		}
-		j := &uploadJob{Path: sp.Path, Key: sp.Key, Opt: sp.Opt, Cfg: cfg, Expect: sp.Expect}
+		j := &uploadJob{Path: sp.Path, Key: sp.Key, Opt: sp.Opt, Cfg: cfg, Expect: sp.Expect, Fresh: fresh}
 		a.up.jobs = append(a.up.jobs, j)
 		jobs[i] = j
 		go func() { a.up.queue <- j }()
 	}
+	a.saveWatch()
 	return jobs
 }
 
@@ -323,6 +378,7 @@ func (a *app) uploadWorker(ctx context.Context) {
 		res, err := a.runJob(ctx, j)
 		a.update(func() {
 			finishJob(j, res, err, time.Now())
+			a.saveWatch()
 			a.reportBroken()
 			a.recheckWake()
 		})
@@ -331,7 +387,7 @@ func (a *app) uploadWorker(ctx context.Context) {
 
 // finishJob records how a run of j ended, and when.
 func finishJob(j *uploadJob, res s3up.Result, err error, now time.Time) {
-	j.Size, j.Done = res.Bytes, now
+	j.Size, j.ETag, j.Done = res.Bytes, res.ETag, now
 	switch {
 	case err != nil:
 		j.State, j.Err = upFailed, err.Error()
@@ -342,13 +398,11 @@ func finishJob(j *uploadJob, res s3up.Result, err error, now time.Time) {
 	}
 }
 
-// runJob uploads one job with its own config, after checking that its source
-// is still the file that was matched. Off the UI thread.
+// runJob uploads one job with its own config, after checkSource. Off the UI
+// thread.
 func (a *app) runJob(ctx context.Context, j *uploadJob) (s3up.Result, error) {
-	if j.Expect != nil {
-		if err := j.Expect.check(j.Path); err != nil {
-			return s3up.Result{}, err
-		}
+	if err := checkSource(j, time.Now()); err != nil {
+		return s3up.Result{}, err
 	}
 	var last time.Time
 	return s3up.New(j.Cfg).UploadWith(ctx, j.Path, j.Key, j.Opt, func(sent, total int64) {
@@ -390,6 +444,7 @@ func (a *app) cancelQueued() {
 			j.State = upCanceled
 		}
 	}
+	a.saveWatch()
 }
 
 func (a *app) clearFinished() {
@@ -404,11 +459,13 @@ func (a *app) clearFinished() {
 
 func (a *app) retryFailed() {
 	for _, j := range a.up.jobs {
-		if j.State == upFailed {
+		if j.State == upFailed && !j.superseded {
+			j.Fresh = j.Fresh || sourceChanged(j)
 			j.State, j.Err, j.Sent, j.Done = upQueued, "", 0, time.Time{}
 			go func() { a.up.queue <- j }()
 		}
 	}
+	a.saveWatch()
 }
 
 func (u *uploads) counts() (active, done, failed int) {

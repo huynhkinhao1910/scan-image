@@ -11,7 +11,8 @@ import (
 // recheckDelays is how long after a push each look at the bucket happens.
 // Another writer was seen replacing a pushed object with an empty one 16
 // seconds after the push.
-var recheckDelays = []time.Duration{time.Minute, 10 * time.Minute}
+// ponytail: the watch ends after a day; a later overwrite is not seen.
+var recheckDelays = []time.Duration{time.Minute, 10 * time.Minute, time.Hour, 6 * time.Hour, 24 * time.Hour}
 
 const (
 	// maxRepush is how often a job is sent again before it is given up as
@@ -24,62 +25,79 @@ const (
 
 type recheckState struct {
 	wakePending bool
+	// saved is the watch file as last written or read.
+	saved []byte
 }
 
 // recheckResult is what the bucket holds for a job's key.
 type recheckResult struct {
 	job   *uploadJob
 	size  int64
+	etag  string
 	found bool
 	err   error
 }
 
 func recheckPending(j *uploadJob) bool {
-	return j.State == upDone && j.Checks < len(recheckDelays)
+	return j.State == upDone && !j.superseded && j.Checks < len(recheckDelays)
 }
 
 func recheckDue(j *uploadJob, now time.Time) bool {
 	return recheckPending(j) && !j.checking && now.Sub(j.Done) >= recheckDelays[j.Checks]
 }
 
-// headJobs asks the bucket for the size of each job's object, with the config
-// the job was pushed with. Off the UI thread: it reads only Key and Cfg, which
-// do not change after a job is queued.
+// headJobs asks the bucket for the size and ETag of each job's object, with
+// the config the job was pushed with. Off the UI thread: it reads only Key and
+// Cfg, which do not change after a job is queued.
 func headJobs(ctx context.Context, jobs []*uploadJob) []recheckResult {
 	out := make([]recheckResult, len(jobs))
 	for i, j := range jobs {
 		hctx, cancel := context.WithTimeout(ctx, recheckTimeout)
-		size, found, err := s3up.New(j.Cfg).Head(hctx, j.Key)
+		obj, found, err := s3up.New(j.Cfg).Stat(hctx, j.Key)
 		cancel()
-		out[i] = recheckResult{job: j, size: size, found: found, err: err}
+		out[i] = recheckResult{job: j, size: obj.Size, etag: obj.ETag, found: found, err: err}
 	}
 	return out
 }
 
-func onBucket(r recheckResult) string {
-	if !r.found {
+func onBucket(j *uploadJob, r recheckResult) string {
+	switch {
+	case !r.found:
 		return "không còn file"
+	case r.size != j.Size:
+		return "chỉ còn " + humanBytes(r.size)
 	}
-	return "chỉ còn " + humanBytes(r.size)
+	return "là nội dung khác"
+}
+
+// intact reports whether the bucket still holds what the job pushed. A job
+// pushed without an ETag is judged by size alone.
+func intact(j *uploadJob, r recheckResult) bool {
+	return r.found && r.size == j.Size && (j.ETag == "" || r.etag == j.ETag)
 }
 
 // settleRecheck applies one result to its job and reports whether the job has
-// to be sent again. A check that failed leaves the job to the next round.
+// to be sent again. A check that failed leaves the job to the next round and
+// shows why.
 func settleRecheck(j *uploadJob, r recheckResult) (again bool) {
 	j.checking = false
 	switch {
-	case j.State != upDone || r.err != nil:
+	case !recheckPending(j):
 		return false
-	case r.found && r.size == j.Size:
+	case r.err != nil:
+		j.Err = "Chưa kiểm lại được trên S3: " + oneLine(r.err)
+		return false
+	case intact(j, r):
 		j.Checks++
+		j.Err = ""
 		return false
 	case j.Repush >= maxRepush:
 		j.State = upFailed
-		j.Err = fmt.Sprintf("Trên S3 %s sau %d lần đẩy lại: có tiến trình khác ghi đè key này", onBucket(r), j.Repush)
+		j.Err = fmt.Sprintf("Trên S3 %s sau %d lần đẩy lại: có tiến trình khác ghi đè key này", onBucket(j, r), j.Repush)
 		return false
 	}
 	j.Repush++
-	j.State, j.Checks, j.Sent, j.Done = upQueued, 0, 0, time.Time{}
+	j.State, j.Err, j.Checks, j.Sent, j.Done = upQueued, "", 0, 0, time.Time{}
 	return true
 }
 
@@ -116,6 +134,7 @@ func (a *app) applyRechecks(results []recheckResult) {
 			go func() { a.up.queue <- r.job }()
 		}
 	}
+	a.saveWatch()
 }
 
 func (a *app) recheckWake() {

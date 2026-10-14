@@ -32,6 +32,7 @@ type scan struct {
 	b       *search.Builder
 	sc      *scanner.Scanner
 	watch   bool // server source: watch for network loss
+	recent  bool // a quick pass: State keeps showing the last usual scan
 	live    atomic.Bool
 	listed  atomic.Int64
 	offline atomic.Bool
@@ -64,15 +65,20 @@ type outcome struct {
 	stalled bool
 	// aborted marks a scan stopped before it began; it changes no state.
 	aborted bool
+	// recent marks a quick pass: it looked at part of the tree only, so it
+	// does not move CheckedAt, replace what the last scan reported or write
+	// the snapshot.
+	recent bool
 }
 
 // start begins a scan unless the service is closing. While one runs, a queued
-// request is remembered for when it ends and any other is dropped.
-func (s *Service) start(req request, queue bool) {
+// request is remembered for when it ends and any other is dropped. It reports
+// whether the request was started or remembered.
+func (s *Service) start(req request, queue bool) bool {
 	s.mu.Lock()
 	if s.stopping {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	if s.run != nil {
 		if queue {
@@ -82,18 +88,22 @@ func (s *Service) start(req request, queue bool) {
 			s.pending = &req
 		}
 		s.mu.Unlock()
-		return
+		return queue
 	}
 	s.launchLocked(req)
 	s.mu.Unlock()
 	s.notify()
+	return true
 }
 
 // launchLocked runs req in a new goroutine. s.mu is held and s.run is nil.
 func (s *Service) launchLocked(req request) {
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &runHandle{cancel: cancel, done: make(chan struct{})}
-	s.run, s.scanErr = h, nil
+	h := &runHandle{cancel: cancel, done: make(chan struct{}), recent: req.mode == recent}
+	s.run = h
+	if req.mode != recent {
+		s.scanErr = nil
+	}
 	go func() {
 		defer close(h.done)
 		defer cancel()
@@ -118,16 +128,26 @@ func (s *Service) runScan(ctx context.Context, cancel context.CancelFunc, mode M
 	if !first {
 		base = old
 	}
-	b := search.NewBuilder(base, search.BuildOptions{
-		Reuse:       mode == Incremental,
+	s.mu.Lock()
+	complete := s.complete
+	s.mu.Unlock()
+	if mode == recent && (first || !complete) {
+		mode = Incremental
+	}
+	bo := search.BuildOptions{
+		Reuse:       mode != Full,
 		VerifySlot:  s.verifySlot(),
 		VerifySlots: s.opt.VerifySlots,
 		Now:         s.opt.Now,
-	})
+	}
+	if mode == recent {
+		bo.Recent, bo.VerifySlots = s.opt.RecentAge, 0
+	}
+	b := search.NewBuilder(base, bo)
 	r := &scan{
 		svc: s, ctx: ctx, cancel: cancel, b: b,
 		sc:    &scanner.Scanner{Src: s.opt.Source, Workers: s.opt.Workers},
-		watch: s.sess.Mode == ModeServer,
+		watch: s.sess.Mode == ModeServer, recent: mode == recent,
 		roots: map[uint32]string{}, bad: map[uint32]struct{}{},
 	}
 	r.beat.Store(time.Now().UnixNano())
@@ -154,6 +174,7 @@ func (s *Service) runScan(ctx context.Context, cancel context.CancelFunc, mode M
 	o := outcome{
 		b: b, ranToEnd: runErr == nil, offline: r.offline.Load(),
 		listed: r.listed.Load(), progress: r.sc.Progress(), failed: r.failed, warn: p.warn,
+		recent: mode == recent,
 	}
 	switch {
 	case r.stalled.Load():
@@ -345,7 +366,7 @@ func (s *Service) endScan(o outcome) {
 		s.publish(o)
 	}
 	s.mu.Lock()
-	if o.b != nil {
+	if o.b != nil && !o.recent {
 		s.progress, s.stats = o.progress, o.b.Stats()
 		s.failedDirs = o.failed
 	}
@@ -355,7 +376,9 @@ func (s *Service) endScan(o outcome) {
 	case o.stalled, o.err == nil && !o.aborted:
 		s.offline = false
 	}
-	s.scanErr = errors.Join(o.err, o.warn, o.unchecked)
+	if err := errors.Join(o.err, o.warn, o.unchecked); err != nil || !o.recent {
+		s.scanErr = err
+	}
 	s.run, s.active = nil, nil
 	if p := s.pending; p != nil && !s.stopping {
 		s.pending = nil
@@ -367,7 +390,8 @@ func (s *Service) endScan(o outcome) {
 
 // publish swaps the new index in when it differs and saves it. The snapshot
 // file is written only when something changed (or a previous save failed, or
-// the index just became complete).
+// the index just became complete). A recent pass leaves the write to the next
+// scan that is not one: the file is the whole index.
 func (s *Service) publish(o outcome) {
 	complete := o.ranToEnd && !o.offline && o.listed > 0
 	changed := o.b.Changed()
@@ -381,10 +405,12 @@ func (s *Service) publish(o outcome) {
 	case complete:
 		s.complete = true
 	}
-	if complete && o.unchecked == nil {
+	if complete && o.unchecked == nil && !o.recent {
 		s.checkedAt = s.opt.Now()
 	}
-	needSave := changed || (complete && !wasComplete) || s.saveErr != nil
+	needSave := changed || (complete && !wasComplete) || s.saveErr != nil || s.unsaved
+	s.unsaved = o.recent && needSave
+	needSave = needSave && !o.recent
 	meta := search.Meta{Complete: s.complete, ScannedAt: s.opt.Now()}
 	saveIx := s.cur
 	s.mu.Unlock()

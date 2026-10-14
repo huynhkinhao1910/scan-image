@@ -244,6 +244,7 @@ func (a *app) requireStore() bool {
 func (a *app) resume() {
 	a.scanFolders()
 	a.startAuto()
+	a.restoreWatch()
 	store := a.store
 	if store == nil {
 		return

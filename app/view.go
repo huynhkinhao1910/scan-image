@@ -510,10 +510,15 @@ func jobLabel(j *uploadJob) string {
 // bucket found.
 func doneLabel(j *uploadJob) string {
 	label := "Xong · " + humanBytes(j.Size)
-	if recheckPending(j) {
-		label += " · chờ kiểm lại"
-	} else {
+	switch {
+	case j.superseded:
+		label += " · đã có lần đẩy mới hơn"
+	case !recheckPending(j):
 		label += " · đã kiểm lại"
+	case j.Err != "":
+		label += " · chưa kiểm lại được"
+	default:
+		label += " · chờ kiểm lại"
 	}
 	if j.Repush > 0 {
 		label += fmt.Sprintf(" · đã đẩy lại %d lần", j.Repush)

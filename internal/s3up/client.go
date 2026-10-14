@@ -233,18 +233,31 @@ func (c *Client) Check(ctx context.Context) error {
 	return nil
 }
 
-// Head returns the size of an object, with ok false when it is missing.
-func (c *Client) Head(ctx context.Context, key string) (size int64, ok bool, err error) {
+// Object is what the bucket tells about a stored object.
+type Object struct {
+	Size int64
+	// ETag changes whenever the object is written with other content.
+	ETag string
+}
+
+// Stat returns the object at key, with ok false when it is missing.
+func (c *Client) Stat(ctx context.Context, key string) (obj Object, ok bool, err error) {
 	resp, err := c.do(ctx, http.MethodHead, key, nil, nil, 0, emptySHA256, nil)
 	if err != nil {
 		var e *Error
 		if errors.As(err, &e) && e.Status == http.StatusNotFound {
-			return 0, false, nil
+			return Object{}, false, nil
 		}
-		return 0, false, err
+		return Object{}, false, err
 	}
 	resp.Body.Close()
-	return resp.ContentLength, true, nil
+	return Object{Size: resp.ContentLength, ETag: resp.Header.Get("ETag")}, true, nil
+}
+
+// Head returns the size of an object, with ok false when it is missing.
+func (c *Client) Head(ctx context.Context, key string) (size int64, ok bool, err error) {
+	obj, ok, err := c.Stat(ctx, key)
+	return obj.Size, ok, err
 }
 
 // Result tells what Upload did.
@@ -252,6 +265,8 @@ type Result struct {
 	Key     string
 	Skipped bool
 	Bytes   int64
+	// ETag is the object's ETag right after a verified upload.
+	ETag string
 }
 
 // UploadOptions tune one upload.
@@ -260,7 +275,7 @@ type UploadOptions struct {
 	// the same size exists.
 	Overwrite bool
 	// Verify heads the object after the upload and fails unless it exists with
-	// the local file's size.
+	// the local file's size. Result.ETag is what that look found.
 	Verify bool
 }
 
@@ -312,7 +327,7 @@ func (c *Client) UploadWith(ctx context.Context, local, key string, opt UploadOp
 		err = c.multipart(ctx, f, key, size, ct, counter)
 	}
 	if err == nil && opt.Verify {
-		err = c.verify(ctx, key, size)
+		res.ETag, err = c.verify(ctx, key, size)
 	}
 	return res, err
 }
@@ -343,17 +358,17 @@ func openRegular(local string) (*os.File, os.FileInfo, error) {
 	return f, st, nil
 }
 
-func (c *Client) verify(ctx context.Context, key string, size int64) error {
-	n, ok, err := c.Head(ctx, key)
+func (c *Client) verify(ctx context.Context, key string, size int64) (etag string, err error) {
+	obj, ok, err := c.Stat(ctx, key)
 	switch {
 	case err != nil:
-		return fmt.Errorf("verify %q: %w", key, err)
+		return "", fmt.Errorf("verify %q: %w", key, err)
 	case !ok:
-		return fmt.Errorf("verify %q: object không tồn tại sau khi upload (local %d bytes)", key, size)
-	case n != size:
-		return fmt.Errorf("verify %q: size trên S3 %d bytes, file local %d bytes", key, n, size)
+		return "", fmt.Errorf("verify %q: object không tồn tại sau khi upload (local %d bytes)", key, size)
+	case obj.Size != size:
+		return "", fmt.Errorf("verify %q: size trên S3 %d bytes, file local %d bytes", key, obj.Size, size)
 	}
-	return nil
+	return obj.ETag, nil
 }
 
 func (c *Client) multipart(ctx context.Context, f *os.File, key string, size int64, ct string, counter *progressCounter) error {

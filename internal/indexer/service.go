@@ -28,15 +28,23 @@ const (
 type Mode int
 
 const (
+	// recent is the quick pass between two periodic scans: it lists only
+	// what changed lately (see search.BuildOptions.Recent). Not for callers.
+	recent Mode = iota - 1
 	// Incremental reuses unchanged leaf directories and cold branches of the
 	// old index (see search.BuildOptions.Reuse).
-	Incremental Mode = iota
+	Incremental
 	// Full lists every directory.
 	Full
 )
 
 const (
-	defaultInterval    = 30 * time.Minute
+	defaultInterval = 30 * time.Minute
+	// Measured on the designers' share (2.9M entries, 4-10 listings a second):
+	// 3 days of changes are about 700 listings, 7 days about 1,500, which no
+	// longer fits between two passes.
+	defaultRecentEvery = 5 * time.Minute
+	defaultRecentAge   = 3 * 24 * time.Hour
 	defaultCheckpoint  = 5 * time.Minute
 	defaultCloseWait   = 5 * time.Second
 	defaultVerifySlots = 64
@@ -56,6 +64,12 @@ type Options struct {
 	// Interval between background scans; 0 means 30 minutes, negative
 	// disables them.
 	Interval time.Duration
+	// RecentInterval is the gap between quick passes over what changed
+	// within RecentAge, run between two background scans; 0 means 5 minutes,
+	// negative disables them. They need background scans (Interval > 0).
+	RecentInterval time.Duration
+	// RecentAge is how far back a quick pass looks; 0 means 3 days.
+	RecentAge time.Duration
 	// Checkpoint is how often the first scan saves its partial index; 0
 	// means 5 minutes.
 	Checkpoint time.Duration
@@ -172,6 +186,7 @@ type Service struct {
 	progress    scanner.Progress
 	stats       search.BuildStats
 	saveErr     error
+	unsaved     bool // a recent pass changed the index and left the snapshot alone
 	scanErr     error
 	loadErr     error
 	failedDirs  []string
@@ -183,6 +198,7 @@ type Service struct {
 type runHandle struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	recent bool // asked for as a quick pass
 }
 
 // Open loads the snapshot of sess.Source so Current() is searchable at once.
@@ -203,6 +219,12 @@ func Open(store *Store, sess Session, opt Options) (*Service, error) {
 	}
 	if opt.Interval == 0 {
 		opt.Interval = defaultInterval
+	}
+	if opt.RecentInterval == 0 {
+		opt.RecentInterval = defaultRecentEvery
+	}
+	if opt.RecentAge <= 0 {
+		opt.RecentAge = defaultRecentAge
 	}
 	if opt.Checkpoint <= 0 {
 		opt.Checkpoint = defaultCheckpoint
@@ -233,7 +255,7 @@ func Open(store *Store, sess Session, opt Options) (*Service, error) {
 	}
 	if opt.Interval > 0 {
 		s.loops.Add(1)
-		go s.tick(opt.Interval)
+		go s.tick()
 	}
 	return s, nil
 }
@@ -257,7 +279,7 @@ func (s *Service) State() State {
 	}
 	cur, act := s.cur, s.active
 	s.mu.Unlock()
-	if act != nil && act.live.Load() {
+	if act != nil && !act.recent && act.live.Load() {
 		st.Progress, st.Stats = act.sc.Progress(), act.b.Stats()
 	}
 	for _, r := range cur.RootList() {
@@ -334,18 +356,40 @@ func (s *Service) Close() {
 	s.mu.Unlock()
 }
 
-func (s *Service) tick(every time.Duration) {
+// tick starts the background scans: a usual one every Options.Interval and,
+// when Options.RecentInterval is shorter, quick passes in between. A usual
+// scan that could not start because a quick pass was running is tried again
+// at the next step; one that met another scan counts that scan as its own.
+func (s *Service) tick() {
 	defer s.loops.Done()
-	t := time.NewTicker(every)
+	every, step := s.opt.Interval, s.opt.Interval
+	if r := s.opt.RecentInterval; r > 0 && r < every {
+		step = r
+	}
+	due := time.Now().Add(every - step/2)
+	t := time.NewTicker(step)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.quit:
 			return
-		case <-t.C:
-			s.start(request{Incremental, true}, false)
+		case now := <-t.C:
+			mode := recent
+			if !now.Before(due) {
+				mode = Incremental
+			}
+			started := s.start(request{mode, true}, false)
+			if mode == Incremental && (started || !s.recentRunning()) {
+				due = now.Add(every - step/2)
+			}
 		}
 	}
+}
+
+func (s *Service) recentRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.run != nil && s.run.recent
 }
 
 func (s *Service) notify() {

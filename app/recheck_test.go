@@ -118,6 +118,7 @@ func TestHeadJobsReadsWhatIsOnTheBucket(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Length", n)
+		w.Header().Set("ETag", `"tag-`+n+`"`)
 	}))
 	defer srv.Close()
 	cfg := s3up.Config{Endpoint: srv.URL, Bucket: "bucket", AccessKey: "AK", SecretKey: "SK", PathStyle: true}
@@ -132,7 +133,7 @@ func TestHeadJobsReadsWhatIsOnTheBucket(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("results %d", len(got))
 	}
-	if r := got[0]; r.job != jobs[0] || r.err != nil || !r.found || r.size != 5 {
+	if r := got[0]; r.job != jobs[0] || r.err != nil || !r.found || r.size != 5 || r.etag != `"tag-5"` {
 		t.Errorf("ok: %+v", r)
 	}
 	if r := got[1]; r.err != nil || !r.found || r.size != 0 {
@@ -212,5 +213,99 @@ func TestEmptySourceIsNeverPushed(t *testing.T) {
 	}
 	if text, _ := brokenStatus(full, false); text != "Sẵn sàng" {
 		t.Fatalf("status %q", text)
+	}
+}
+
+func TestSettleRecheckComparesTheETag(t *testing.T) {
+	done := time.Date(2026, 10, 14, 9, 0, 0, 0, time.Local)
+
+	t.Run("same size with other content is pushed again", func(t *testing.T) {
+		j := doneJob("a", 5, done)
+		j.ETag = `"aa"`
+		if again := settleRecheck(j, recheckResult{job: j, size: 5, etag: `"bb"`, found: true}); !again {
+			t.Fatal("an object replaced by one of the same size was left alone")
+		}
+		if j.State != upQueued || j.Repush != 1 {
+			t.Fatalf("state %v repush %d", j.State, j.Repush)
+		}
+	})
+
+	t.Run("same ETag counts one check", func(t *testing.T) {
+		j := doneJob("a", 5, done)
+		j.ETag = `"aa"`
+		if again := settleRecheck(j, recheckResult{job: j, size: 5, etag: `"aa"`, found: true}); again || j.Checks != 1 {
+			t.Fatalf("again %v checks %d", again, j.Checks)
+		}
+	})
+}
+
+func TestFinishJobKeepsTheETag(t *testing.T) {
+	j := &uploadJob{}
+
+	finishJob(j, s3up.Result{Bytes: 5, ETag: `"aa"`}, nil, time.Now())
+
+	if j.State != upDone || j.ETag != `"aa"` {
+		t.Fatalf("state %v etag %q", j.State, j.ETag)
+	}
+}
+
+func TestWatchLastsADay(t *testing.T) {
+	if last := recheckDelays[len(recheckDelays)-1]; last < 24*time.Hour {
+		t.Fatalf("last look after %v, want a day", last)
+	}
+}
+
+func TestEnqueueEndsTheWatchOfAnOlderPushOfTheKey(t *testing.T) {
+	a := testUploader()
+	old := doneJob("X/a.png", 5, time.Now())
+	other := doneJob("X/b.png", 5, time.Now())
+	a.up.jobs = []*uploadJob{old, other}
+
+	a.enqueueUploads(s3up.Config{}, []uploadSpec{{Path: "/v/new/a.png", Key: "X/a.png"}})
+
+	if recheckPending(old) {
+		t.Error("the older push is still watched: it would be sent again over the new one")
+	}
+	if !recheckPending(other) {
+		t.Error("a push of another key lost its watch")
+	}
+}
+
+func TestNewUploadSupersedesEveryOlderJobOfTheKey(t *testing.T) {
+	a := testUploader()
+	checking := doneJob("X/a.png", 5, time.Now())
+	checking.checking = true
+	resend := &uploadJob{Path: "/v/old/a.png", Key: "X/a.png", State: upQueued, Repush: 1}
+	running := &uploadJob{Path: "/v/older/a.png", Key: "X/a.png", State: upRunning, Repush: 1}
+	a.up.jobs = []*uploadJob{checking, resend, running}
+
+	a.enqueueUploads(s3up.Config{}, []uploadSpec{{Path: "/v/new/a.png", Key: "X/a.png"}})
+
+	if again := settleRecheck(checking, recheckResult{job: checking, size: 0, found: true}); again || checking.State != upDone {
+		t.Errorf("a look under way sent the superseded job again: again %v state %v", again, checking.State)
+	}
+	if resend.State != upCanceled {
+		t.Errorf("a superseded job waiting to be sent again: state %v, want cancelled", resend.State)
+	}
+	finishJob(running, s3up.Result{Bytes: 5}, nil, time.Now())
+	if recheckPending(running) || watched(running) {
+		t.Error("a superseded job that finished later is watched")
+	}
+	if got := jobLabel(running); !strings.Contains(got, "mới hơn") {
+		t.Errorf("label %q does not tell about the newer push", got)
+	}
+}
+
+func TestFailedLookIsShownUntilOneSucceeds(t *testing.T) {
+	j := doneJob("a", 5, time.Now())
+
+	settleRecheck(j, recheckResult{job: j, err: errors.New("403 Forbidden")})
+
+	if !strings.Contains(j.Err, "403 Forbidden") || !strings.Contains(jobLabel(j), "chưa kiểm lại được") {
+		t.Fatalf("err %q label %q", j.Err, jobLabel(j))
+	}
+	settleRecheck(j, recheckResult{job: j, size: 5, found: true})
+	if j.Err != "" || strings.Contains(jobLabel(j), "chưa kiểm lại được") {
+		t.Fatalf("after a good look: err %q label %q", j.Err, jobLabel(j))
 	}
 }
