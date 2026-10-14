@@ -43,7 +43,7 @@ const (
 	// Measured on the designers' share (2.9M entries, 4-10 listings a second):
 	// 3 days of changes are about 700 listings, 7 days about 1,500, which no
 	// longer fits between two passes.
-	defaultRecentEvery = 5 * time.Minute
+	defaultRecentEvery = 10 * time.Minute
 	defaultRecentAge   = 3 * 24 * time.Hour
 	defaultCheckpoint  = 5 * time.Minute
 	defaultCloseWait   = 5 * time.Second
@@ -65,7 +65,7 @@ type Options struct {
 	// disables them.
 	Interval time.Duration
 	// RecentInterval is the gap between quick passes over what changed
-	// within RecentAge, run between two background scans; 0 means 5 minutes,
+	// within RecentAge, run between two background scans; 0 means 10 minutes,
 	// negative disables them. They need background scans (Interval > 0).
 	RecentInterval time.Duration
 	// RecentAge is how far back a quick pass looks; 0 means 3 days.

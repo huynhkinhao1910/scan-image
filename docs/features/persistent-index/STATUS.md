@@ -108,6 +108,7 @@ Added after the review fixes (user asked 2026-10-13):
   - Not seen by the quick pass: a change inside a folder that had nothing recent at the last scan and whose own mtime did not change (a designer who was away for more than 3 days and edits an old file in place). The usual scan every 30 minutes finds it under its own rules, and from then on the folder is recent.
   - Cost: every pass builds a new index in memory (the whole index is copied), and while it runs the status line says the app is updating. What a pass found is lost if the app quits before the next usual scan writes the snapshot; the next scan finds it again.
   - Review (go-reviewer, 2026-10-14): no finding on the reuse rule or on races. Fixed: a usual scan still running when the next one is due now counts as that scan, so two usual scans do not run back to back (`runHandle.recent`, `recentRunning`; only a quick pass in the way makes `tick` try again at the next step). Left as is: `Close` does not write what a quick pass found, and a quick-pass request that runs as a usual scan keeps the old `ScanErr` on screen until it ends.
+  - Interval changed to 10 minutes the same day (user: "tôi nghĩ là 10p đi vì index tìm chậm xíu cũng được"); the "5 minutes" above describes the first version. The unattended push cycle (`autoEvery`) stays at 5 minutes.
   - Not measured: the pass has not run against the NAS (the share is not mounted on the development Mac), so the one to three minutes are an estimate.
 
 Still open:
