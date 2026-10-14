@@ -2,5 +2,6 @@
   "name": "Scan Image",
   "identifier": "com.isuccess.scanimage",
   "version": "0.1.0",
-  "out": "build"
+  "out": "build",
+  "main": "./app"
 }

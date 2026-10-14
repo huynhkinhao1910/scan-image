@@ -10,7 +10,7 @@ macOS app for Everything-style search over a TB-scale image NAS mounted via SMB 
 - `go run ./cmd/nasprobe -path /Volumes/X -lister readdir,bulk` — measure listing throughput
 
 ## Architecture rules
-- `internal/*` must never import mygo; UI lives in package main only.
+- `internal/*` must never import mygo; UI lives in package main only, which is the `app/` directory (`"main": "./app"` in `mygo.json`; `mygo.json`, `resources/` and `icons/` stay at the root).
 - All file access goes through `source.Source`; add adapters (e.g. remote host), do not bypass it.
 - Network latency is the bottleneck: never stat or read files one-by-one on the UI thread; keep many listings in flight.
 - Search runs in RAM over the flat arenas in `internal/search`; do not move search to SQLite. Persistence is a binary snapshot of the arenas (`internal/search/snapshot.go`, driven by `internal/indexer`), stored on local disk, never on the NAS.

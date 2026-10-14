@@ -63,6 +63,10 @@ Open:
 - 68 directories fail with "no such file or directory" (for example `phu.des/2025/Thang 04/22.04/Huyền HTN.Etsy`); the same name fails from the shell in NFC and NFD while its siblings open. Cause not proven.
 - Every Mac scans the same NAS on its own; they compete for the same few listings per second.
 
+## Layout (2026-10-14) — not committed
+
+The user asked for the app's files to leave the repository root: every root `*.go` file (package main, with its tests) moved to `app/` with `git mv`, and `mygo.json` has `"main": "./app"`. No code changed. `mygo.json`, `resources/` and `icons/` stay at the root, so `go tool mygo dev` and `go tool mygo build` are run from the root as before. File names in the notes below (`app.go`, `view.go`, …) now live under `app/`.
+
 ## Current state (2026-10-13, afternoon)
 
 Nothing is committed (commit only when the user says so). Verify = `gofmt -l .`, `CGO_ENABLED=0 go vet ./...`, `CGO_ENABLED=0 go test -race -count=1 ./...`; last run green after everything listed under "Fixed" below.
