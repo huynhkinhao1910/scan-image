@@ -12,9 +12,12 @@ import (
 )
 
 const (
-	// ponytail: fixed pace; make it a setting when someone needs another one.
-	autoEvery      = 5 * time.Minute
+	autoDefaultMin = 1
+	autoMaxMin     = 60
 	autoStartDelay = 30 * time.Second
+	// autoRewalk keeps a fast cycle from walking the date folders again and
+	// again for names it just failed to find there.
+	autoRewalk = 5 * time.Minute
 )
 
 type autoPhase int
@@ -41,7 +44,34 @@ type autoState struct {
 	ask    bool
 	phase  autoPhase
 	waking bool
+	// gen drops a pending wake when the pace changes.
+	gen    int
+	every  float64
 	pushed map[string]pushedSource
+	// walked is when each name was last looked for by date.
+	walked map[string]time.Time
+}
+
+// autoMinutes is the saved pace, within bounds.
+func autoMinutes(n int) int {
+	if n <= 0 {
+		return autoDefaultMin
+	}
+	return min(n, autoMaxMin)
+}
+
+func (a *app) autoEvery() time.Duration {
+	return time.Duration(autoMinutes(a.up.cfg.AutoMinutes)) * time.Minute
+}
+
+// needWalk reports a name not looked for by date in the last autoRewalk.
+func needWalk(names []string, walked map[string]time.Time, now time.Time) bool {
+	for _, n := range names {
+		if at, ok := walked[n]; !ok || now.Sub(at) >= autoRewalk {
+			return true
+		}
+	}
+	return false
 }
 
 func stampSig(path string, size int64, mod time.Time) string {
@@ -103,14 +133,15 @@ func autoMessage(at time.Time, queued, repeated int, rows []brokenRow) string {
 	return autoPrefix(at) + strings.Join(parts, ", ")
 }
 
-func autoConfirmText(bucket string) string {
+func autoConfirmText(bucket string, minutes int) string {
 	return fmt.Sprintf("Mỗi %d phút app sẽ tự lấy danh sách, tìm file trên ổ mạng và GHI ĐÈ lên bucket %s mà không hỏi lại. "+
 		"Chỉ đẩy file trùng tên chính xác; có nhiều bản thì lấy bản sửa gần nhất. Dòng tên gần giống vẫn chờ bạn xác nhận.",
-		int(autoEvery.Minutes()), strings.TrimSpace(bucket))
+		minutes, strings.TrimSpace(bucket))
 }
 
 // startAuto resumes the unattended cycle saved in the settings. UI thread only.
 func (a *app) startAuto() {
+	a.broken.auto.every = float64(autoMinutes(a.up.cfg.AutoMinutes))
 	if a.up.cfg.AutoPush {
 		a.broken.auto.on = true
 		a.autoWake(autoStartDelay)
@@ -123,13 +154,36 @@ func (a *app) setAuto(on bool) {
 	b := &a.broken
 	b.auto.on, b.auto.ask = on, false
 	a.up.cfg.AutoPush, a.up.form.AutoPush = on, on
-	if a.up.cfgPath != "" {
-		if err := s3up.SaveConfig(a.up.cfgPath, a.up.cfg, nil); err != nil {
-			b.msg = "Không lưu được lựa chọn tự động: " + oneLine(err)
-		}
-	}
+	a.saveAuto()
 	if on {
 		a.autoTick()
+	}
+}
+
+// setAutoMinutes saves a new pace and moves the next cycle to it. UI thread
+// only.
+func (a *app) setAutoMinutes(n int) {
+	n = autoMinutes(n)
+	if n == autoMinutes(a.up.cfg.AutoMinutes) {
+		return
+	}
+	a.up.cfg.AutoMinutes, a.up.form.AutoMinutes = n, n
+	a.saveAuto()
+	s := &a.broken.auto
+	s.gen++
+	s.waking = false
+	if s.on {
+		a.autoWake(a.autoEvery())
+	}
+}
+
+// saveAuto writes the auto settings; the secret is not written again.
+func (a *app) saveAuto() {
+	if a.up.cfgPath == "" {
+		return
+	}
+	if err := s3up.SaveConfig(a.up.cfgPath, a.up.cfg, nil); err != nil {
+		a.broken.msg = "Không lưu được lựa chọn tự động: " + oneLine(err)
 	}
 }
 
@@ -139,8 +193,12 @@ func (a *app) autoWake(d time.Duration) {
 		return
 	}
 	s.waking = true
+	gen := s.gen
 	time.AfterFunc(d, func() {
 		a.update(func() {
+			if s.gen != gen {
+				return
+			}
 			s.waking = false
 			a.autoTick()
 		})
@@ -155,7 +213,7 @@ func (a *app) autoTick() {
 	if !s.on {
 		return
 	}
-	a.autoWake(autoEvery)
+	a.autoWake(a.autoEvery())
 	if s.phase != autoIdle || b.fetching || b.matching || b.quicking || rowsBusy(b.rows) {
 		return
 	}
@@ -181,6 +239,16 @@ func (a *app) autoAfterMatch() {
 	if b.auto.phase != autoMatching {
 		return
 	}
+	now, names := time.Now(), quickNames(b.rows)
+	if !needWalk(names, b.auto.walked, now) {
+		a.autoPush()
+		return
+	}
+	walked := make(map[string]time.Time, len(names))
+	for _, n := range names {
+		walked[n] = now
+	}
+	b.auto.walked = walked
 	a.quickFind()
 	if b.quicking {
 		b.auto.phase = autoFinding
@@ -223,8 +291,12 @@ func (a *app) autoPush() {
 func (a *app) autoToggle(c *ui.Context) {
 	b := &a.broken
 	on := b.auto.on
-	label := fmt.Sprintf("Tự động (%d phút)", int(autoEvery.Minutes()))
-	if !ui.Checkbox(c, &on, label).Tooltip("Tự lấy danh sách, tìm file và đẩy lên S3 theo chu kỳ").Changed() {
+	changed := ui.Checkbox(c, &on, "Tự động").Tooltip("Tự lấy danh sách, tìm file và đẩy lên S3 theo chu kỳ").Changed()
+	if ui.NumberInput(c, &b.auto.every, 1, autoMaxMin, 1).Label("Số phút giữa hai lần tự động").Width(90).Changed() {
+		a.setAutoMinutes(int(b.auto.every))
+	}
+	ui.Text(c, "phút").TextColor(colMuted)
+	if !changed {
 		return
 	}
 	if !on {
@@ -243,7 +315,7 @@ func (a *app) autoConfirm(c *ui.Context) {
 	ui.Modal(c, &b.auto.ask, func() {
 		ui.Column(c).Width(480).Gap(10).Children(func() {
 			ui.Text(c, "Bật tự động đẩy file hỏng").Bold()
-			ui.Text(c, autoConfirmText(a.up.cfg.Bucket)).Wrap()
+			ui.Text(c, autoConfirmText(a.up.cfg.Bucket, autoMinutes(a.up.cfg.AutoMinutes))).Wrap()
 			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
 				if ui.Button(c, "Huỷ").Clicked() {
 					b.auto.ask = false

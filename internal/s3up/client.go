@@ -36,6 +36,8 @@ type Config struct {
 	// AutoPush keeps the broken-file tab fetching, matching and pushing on
 	// its own.
 	AutoPush bool `json:"autoPush"`
+	// AutoMinutes is the pace of that cycle; zero means the caller's default.
+	AutoMinutes int `json:"autoMinutes,omitempty"`
 }
 
 // Validate reports the first missing field.
