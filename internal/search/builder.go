@@ -14,15 +14,24 @@ const NoPrev = ^uint32(0)
 // not trusted as a basis for reuse (see flagStable).
 const RacyWindow = 10 * time.Minute
 
+// ColdAge is how long a branch must have gone without any change before an
+// incremental scan stops walking into it (see BuildOptions.Reuse).
+const ColdAge = 30 * 24 * time.Hour
+
 // BuildOptions tune a Builder.
 type BuildOptions struct {
-	// Reuse lets unchanged leaf directories be copied from the old index.
+	// Reuse lets unchanged directories be copied from the old index instead
+	// of listed: a leaf whose mtime is the same, and a whole branch whose top
+	// has the same mtime and in which nothing is newer than ColdAge. A
+	// directory's mtime says nothing about what lies deeper, so a change deep
+	// inside a cold branch is only seen when the branch's verify slot is due.
 	// False lists everything (a full rescan) but Failed still keeps the old
 	// subtree.
 	Reuse bool
-	// VerifySlot and VerifySlots rotate a forced re-listing: a leaf whose
-	// path hashes to VerifySlot modulo VerifySlots is listed even when its
-	// mtime is unchanged. VerifySlots == 0 disables the rotation.
+	// VerifySlot and VerifySlots rotate a forced re-listing: a reusable
+	// directory whose path hashes to VerifySlot modulo VerifySlots is listed
+	// anyway, together with everything below it. VerifySlots == 0 disables
+	// the rotation.
 	VerifySlot, VerifySlots uint32
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
@@ -37,8 +46,9 @@ type Child struct {
 
 // BuildStats counts what the builder took from the old index.
 type BuildStats struct {
-	// ReusedDirs and ReusedEntries count leaf directories copied instead of
-	// listed and the entries inside them.
+	// ReusedDirs and ReusedEntries count the directories copied instead of
+	// listed (unchanged leaves and every directory of a cold branch) and the
+	// entries inside them.
 	ReusedDirs, ReusedEntries int
 	// KeptDirs counts directories whose old contents were kept by Failed.
 	KeptDirs int
@@ -59,13 +69,15 @@ type Builder struct {
 	opt      BuildOptions
 	ix       *Index
 	first    []uint32
+	hot      []bool
 	oldRoots map[string]Root
 
 	// guarded by ix.mu
-	changed  bool
-	matched  int
-	rejected map[uint32]struct{}
-	stats    BuildStats
+	changed   bool
+	matched   int
+	rejected  map[uint32]struct{}
+	verifying map[uint32]struct{} // new dirs whose branch is listed in full
+	stats     BuildStats
 }
 
 // NewBuilder starts a build against old, which may be nil. old must be a
@@ -80,6 +92,10 @@ func NewBuilder(old *Index, opt BuildOptions) *Builder {
 		return b
 	}
 	b.first = firstChildren(old.parent)
+	if opt.Reuse {
+		b.hot = hotEntries(old, opt.Now().Add(-ColdAge).Unix())
+		b.verifying = map[uint32]struct{}{}
+	}
 	b.oldRoots = map[string]Root{}
 	for _, r := range old.RootList() {
 		b.oldRoots[r.Key] = r
@@ -99,6 +115,27 @@ func firstChildren(parent []uint32) []uint32 {
 		}
 	}
 	return first
+}
+
+// hotEntries marks every old entry that has, in itself or anywhere below it,
+// an mtime at or after cutoff or a directory without flagStable. Children
+// have higher ids than their parent, so one backward pass carries the mark
+// up the tree.
+func hotEntries(old *Index, cutoff int64) []bool {
+	hot := make([]bool, len(old.parent))
+	for i := len(hot) - 1; i >= 0; i-- {
+		p := old.parent[i]
+		if p == NoParent {
+			continue
+		}
+		if old.mtime[i] >= cutoff || old.flags[i]&(flagDir|flagStable) == flagDir {
+			hot[i] = true
+		}
+		if hot[i] {
+			hot[p] = true
+		}
+	}
+	return hot
 }
 
 // reserve sizes the new arrays like the old ones so a mostly-reused build
@@ -158,7 +195,8 @@ func (b *Builder) AddRoot(key, path string) (id, prev uint32) {
 
 // Listed records the listing of dir, whose old counterpart is prev (or
 // NoPrev). It returns the subdirectories that still need listing; unchanged
-// stable leaves are copied from the old index instead and not returned.
+// stable leaves and cold branches are copied from the old index instead and
+// not returned.
 func (b *Builder) Listed(dir, prev uint32, entries []source.Entry) []Child {
 	ix := b.ix
 	ix.mu.Lock()
@@ -250,6 +288,7 @@ func (b *Builder) subdirsLocked(dir, prev, first uint32, entries []source.Entry)
 	if b.opt.Reuse && b.opt.VerifySlots > 0 && len(old) > 0 {
 		h = b.pathHash(dir)
 	}
+	_, verify := b.verifying[dir]
 	var out []Child
 	for i, e := range entries {
 		if !e.IsDir {
@@ -261,32 +300,41 @@ func (b *Builder) subdirsLocked(dir, prev, first uint32, entries []source.Entry)
 			out = append(out, Child{Name: e.Name, ID: id, Prev: NoPrev})
 			continue
 		}
-		if b.reusable(o, e, h) {
-			b.ix.flags[id] = b.old.flags[o]
-			_, n := b.copySubtreeLocked(o, id)
-			b.stats.ReusedDirs++
-			b.stats.ReusedEntries += n
-			continue
+		due := verify
+		if !due && b.unchanged(o, e) {
+			if !b.verifyDue(h, e.Name) {
+				b.ix.flags[id] = b.old.flags[o]
+				dirs, n := b.copySubtreeLocked(o, id)
+				b.stats.ReusedDirs += dirs
+				b.stats.ReusedEntries += n
+				continue
+			}
+			due = true
+		}
+		if due {
+			b.verifying[id] = struct{}{}
 		}
 		out = append(out, Child{Name: e.Name, ID: id, Prev: o})
 	}
 	return out
 }
 
-// reusable reports whether old directory o may stand in for the listed
-// entry e under a parent whose path hash is h.
-func (b *Builder) reusable(o uint32, e source.Entry, h uint32) bool {
+// unchanged reports whether old directory o may stand in for the listed
+// entry e: its own listing is proven current by the mtime, and it is either
+// a leaf or the top of a cold branch.
+func (b *Builder) unchanged(o uint32, e source.Entry) bool {
 	old := b.old
 	if !b.opt.Reuse || old.flags[o]&flagStable == 0 || old.mtime[o] != e.ModTime.Unix() {
 		return false
 	}
-	if b.hasSubdir(o) {
-		return false
-	}
-	if s := b.opt.VerifySlots; s > 0 {
-		return fnvString(fnvString(h, "/"), e.Name)%s != b.opt.VerifySlot
-	}
-	return true
+	return !b.hot[o] || !b.hasSubdir(o)
+}
+
+// verifyDue reports whether the rotation forces a listing of the directory
+// name under a parent whose path hash is h.
+func (b *Builder) verifyDue(h uint32, name string) bool {
+	s := b.opt.VerifySlots
+	return s > 0 && fnvString(fnvString(h, "/"), name)%s == b.opt.VerifySlot
 }
 
 func (b *Builder) hasSubdir(dir uint32) bool {

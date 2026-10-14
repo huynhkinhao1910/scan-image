@@ -10,7 +10,7 @@ Search chạy trong RAM và không đi qua mạng. Index được **lưu trên m
 
 ## Index lưu trên máy và chạy nền
 - **Mở là search ngay**: app nhớ nguồn mở lần cuối, nạp index đã lưu (3 triệu mục khoảng 0,35 giây) rồi mới quét cập nhật ở nền.
-- **Quét incremental**: SMB không có change journal, nên app đi lại cây thư mục nhưng bỏ qua thư mục lá có mtime không đổi. Mỗi lượt soát lại thêm khoảng 1/64 số thư mục lá để tự chữa những thay đổi mà mtime không thấy (file bị ghi đè tại chỗ). Lỗi mạng hay bấm Dừng giữa chừng không làm mất mục nào: phần chưa quét giữ dữ liệu cũ.
+- **Quét incremental**: SMB không có change journal, nên app đi lại cây thư mục nhưng bỏ qua thư mục lá có mtime không đổi, và bỏ qua cả nhánh mà trong 30 ngày không có gì thay đổi (không list bất kỳ thư mục nào bên trong). Mỗi lượt soát lại đầy đủ khoảng 1/64 số thư mục lá và nhánh đã bỏ qua, để tự chữa những thay đổi mà mtime không thấy: file bị ghi đè tại chỗ, hoặc thay đổi nằm sâu trong một nhánh cũ (mtime của thư mục cha không đổi theo). Thay đổi trong nhánh cũ vì vậy có thể hiện trễ tới một vòng 64 lượt (khoảng 32 giờ khi quét mỗi 30 phút); "Quét lại toàn bộ" trong Settings thấy ngay. Lỗi mạng hay bấm Dừng giữa chừng không làm mất mục nào: phần chưa quét giữ dữ liệu cũ.
 - **Chạy nền**: đóng cửa sổ là ẩn, app vẫn ở thanh menu (menu: Mở Scan Image, Quét ngay, Thoát). Tự quét lại mỗi 30 phút và 15 giây sau khi máy thức dậy. Cmd+Q mới thoát thật.
 - **Mở cùng máy**: bật trong Settings → INDEX. macOS 13+ chỉ cho bật trên bản đã đóng gói (`go tool mygo build`), không bật được khi chạy `go tool mygo dev`.
 - **Offline**: không tới được server thì app dùng index đã lưu và không bật hộp thoại mount nào.

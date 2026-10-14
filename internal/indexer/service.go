@@ -28,7 +28,8 @@ const (
 type Mode int
 
 const (
-	// Incremental reuses unchanged leaf directories of the old index.
+	// Incremental reuses unchanged leaf directories and cold branches of the
+	// old index (see search.BuildOptions.Reuse).
 	Incremental Mode = iota
 	// Full lists every directory.
 	Full

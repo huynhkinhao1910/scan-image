@@ -49,6 +49,20 @@ UI batch (Bulk lister, recent-rate card, grid/thumb removal, tabs scaffold) done
 "File hỏng" tab done — internal/brokenlist (new), internal/s3up (UploadWith, Config.ListURL), internal/search/findnames.go, broken.go, upload.go — whole repo green with -race at that point
 State.FailedDirs done — internal/indexer/{scan,service}.go, app.go `problems` — whole repo green with -race at that point
 
+## Scan speed (2026-10-13, evening) — not committed
+
+User reported the rescan as too slow (speed card: 27 entries/s). Measured on this Mac against `/Volumes/Designer ZenE` with the app's own lister, cold folders: about 4–10 directory listings per second whether 4, 16 or 48 workers run (p50 per listing 0.28 s → 3.8 s). Whether the limit is the NAS or macOS smbfs is not known. The local snapshot has 64,496 directories, 18,266 of them non-leaf; an incremental scan listed about 19,950 directories every time.
+
+Done: `search.Builder` also reuses a whole branch when its top is stable with the same mtime and nothing inside is newer than `search.ColdAge` (30 days) or lacks `flagStable` (`hotEntries`, `unchanged`). A reusable directory whose verify slot is due is listed together with everything below it (`verifying`). `BuildStats.ReusedDirs` now counts every directory of a reused branch. Tests in `internal/search/builder_cold_test.go` (three failed before the change). Replaying an unchanged rescan against the real snapshot: 3,774–4,408 listings instead of about 19,950.
+
+Known cost, told to the user: a change deep inside a branch that was quiet for 30 days is seen only when that branch's slot is due (one of 64 scans, about 32 hours at one scan per 30 minutes, longer if the Mac is off at that time) or on a full rescan.
+
+Open:
+- Not run in the app against the NAS yet.
+- `scanWorkers` is still 48; the measurement says 8 gives the same throughput with far lower latency per listing. Not changed, the user has not asked.
+- 68 directories fail with "no such file or directory" (for example `phu.des/2025/Thang 04/22.04/Huyền HTN.Etsy`); the same name fails from the shell in NFC and NFD while its siblings open. Cause not proven.
+- Every Mac scans the same NAS on its own; they compete for the same few listings per second.
+
 ## Current state (2026-10-13, afternoon)
 
 Nothing is committed (commit only when the user says so). Verify = `gofmt -l .`, `CGO_ENABLED=0 go vet ./...`, `CGO_ENABLED=0 go test -race -count=1 ./...`; last run green after everything listed under "Fixed" below.
