@@ -78,3 +78,28 @@ func TestAutoMessage(t *testing.T) {
 		t.Errorf("autoMessage = %q, want %q", got, want)
 	}
 }
+
+func TestAutoMinutesBounds(t *testing.T) {
+	for in, want := range map[int]int{0: 1, -3: 1, 1: 1, 7: 7, 60: 60, 500: 60} {
+		if got := autoMinutes(in); got != want {
+			t.Errorf("autoMinutes(%d) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestNeedWalkSkipsNamesLookedForRecently(t *testing.T) {
+	now := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	walked := map[string]time.Time{"a.png": now.Add(-time.Minute), "b.png": now.Add(-autoRewalk)}
+	if needWalk([]string{"a.png"}, walked, now) {
+		t.Error("a name walked a minute ago must not walk again")
+	}
+	if !needWalk([]string{"a.png", "b.png"}, walked, now) {
+		t.Error("a name walked autoRewalk ago must walk again")
+	}
+	if !needWalk([]string{"a.png", "new.png"}, walked, now) {
+		t.Error("a new name must walk at once")
+	}
+	if needWalk(nil, walked, now) {
+		t.Error("no names, no walk")
+	}
+}
